@@ -4,7 +4,15 @@ langchain-core>=0.3.0
 langchain-community>=0.3.0
 langchain-text-splitters>=0.3.0
 
-# --- Proveedor de LLM/embeddings exigido por el enunciado (Google AI Studio) #
+# --- Proveedor de CHAT activo por defecto (Groq) --------------------------- #
+langchain-groq>=0.2.0
+
+# --- Proveedor de EMBEDDINGS activo por defecto (local, sin API) ---------- #
+langchain-huggingface>=0.1.0
+sentence-transformers>=3.0.0
+
+# --- Proveedor exigido originalmente por el enunciado (Google AI Studio), -- #
+# --- se mantiene disponible para uso futuro -------------------------------- #
 langchain-google-genai>=2.0.0
 
 # --- Proveedor alternativo (GitHub Models, patrón usado en los notebooks) - #
@@ -21,6 +29,9 @@ python-dotenv>=1.0.0
 
 # --- Carga de documentos ------------------------------------------------- #
 pypdf>=4.0.0
+
+# --- Cliente HTTP (usado en tests/scripts de diagnóstico de proveedores) -- #
+requests>=2.31.0
 
 # --- Tests ------------------------------------------------------------------ #
 pytest>=8.0.0

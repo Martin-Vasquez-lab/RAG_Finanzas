@@ -5,15 +5,27 @@ Este módulo concentra TODA la lógica de conexión a proveedores de LLM/embeddi
 y los parámetros que gobiernan el pipeline (chunking, temperatura, rutas, etc.),
 de modo que:
   1) Nunca haya claves API hardcodeadas en el resto del código.
-  2) Cambiar de proveedor (Google AI Studio <-> GitHub Models) implique tocar
-     solo este archivo.
+  2) Cambiar de proveedor implique tocar solo este archivo.
 
 El enunciado del EP1 exige el uso de Google AI Studio / Gemini
-(`text-embedding-004` + Gemini Flash), por lo que ese es el proveedor por
-defecto (`LLM_PROVIDER=google`). El curso también enseña el patrón GitHub
+(`text-embedding-004` + Gemini Flash); ese soporte se mantiene íntegro en
+`get_chat_model("google")` / `get_embeddings("google")` para poder volver a
+usarlo si el proyecto de Google Cloud asociado a la clave recupera acceso
+(ver nota de vigencia más abajo). El proveedor de CHAT activo por defecto es
+ahora **Groq** (`LLM_PROVIDER=groq`), y el de EMBEDDINGS es un modelo
+**local** vía `sentence-transformers` (`EMBEDDING_PROVIDER=local`), ya que
+Groq no ofrece API de embeddings. El curso también enseña el patrón GitHub
 Models (langchain-openai contra el endpoint de Azure Inference), que se deja
-disponible como alternativa aislada para no reescribir el resto del pipeline
-si el docente pide comparar proveedores.
+disponible como alternativa aislada para chat y embeddings.
+
+Nota de vigencia: los proveedores de LLM deprecan modelos con frecuencia
+(ver historial de este archivo: "gemini-1.5-flash"/"text-embedding-004" y
+luego "gemini-2.5-flash" quedaron retirados; "llama-3.3-70b-versatile" en
+Groq tampoco existe ya para cuentas nuevas). Si un modelo empieza a fallar
+con 404 "not found"/"no longer available", verifica el catálogo vigente
+antes de asumir un bug de código:
+  - Google: `client.models.list()` del SDK `google-genai`.
+  - Groq: `GET https://api.groq.com/openai/v1/models` con tu API key.
 """
 
 from __future__ import annotations
@@ -39,7 +51,13 @@ DATA_PROCESSED_DIR: Path = BASE_DIR / "data" / "processed"
 VECTORSTORE_DIR: Path = BASE_DIR / "vectorstore"
 FAISS_INDEX_NAME: str = "auditoria_faiss_index"
 
-LLMProvider = Literal["google", "github"]
+# El proveedor de CHAT y el de EMBEDDINGS se configuran por separado (antes
+# era una única variable): Groq no tiene API de embeddings, así que forzar
+# un único "LLM_PROVIDER" para ambos habría dejado el pipeline RAG
+# incompleto. Cada uno se resuelve de forma independiente en
+# `get_chat_model()` / `get_embeddings()`.
+LLMProvider = Literal["groq", "google", "github"]
+EmbeddingProvider = Literal["local", "google", "github"]
 
 
 @dataclass(frozen=True)
@@ -50,25 +68,37 @@ class Settings:
     pero pueden sobrescribirse vía variables de entorno (ver `.env.example`).
     """
 
-    # --- Proveedor de LLM/embeddings ------------------------------------- #
+    # --- Proveedores activos (chat y embeddings, independientes) --------- #
     llm_provider: LLMProvider = field(
-        default_factory=lambda: os.getenv("LLM_PROVIDER", "google").lower()  # type: ignore[return-value]
+        default_factory=lambda: os.getenv("LLM_PROVIDER", "groq").lower()  # type: ignore[return-value]
+    )
+    embedding_provider: EmbeddingProvider = field(
+        default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "local").lower()  # type: ignore[return-value]
     )
 
-    # --- Google AI Studio / Gemini (proveedor exigido por el enunciado) -- #
-    # NOTA: "gemini-1.5-flash" y "text-embedding-004" (los nombres que
-    # documentaba originalmente el enunciado) fueron retirados del catálogo
-    # de modelos de Google AI Studio. "gemini-2.5-flash" también dejó de
-    # estar disponible para proyectos nuevos poco después. Se verificó
-    # invocando `generate_content`/`embed_content` directo (SDK
-    # `google-genai`, el que usa `langchain-google-genai>=4`) cuáles nombres
-    # responden hoy: chat -> "gemini-3.6-flash" (el que la propia API de
-    # Google recomienda en el mensaje de error de modelos retirados) y
-    # embeddings -> "models/gemini-embedding-001". Si tu cuenta tiene acceso
-    # a otros modelos, sobrescribe vía .env sin tocar código. Dado el ritmo
-    # de deprecación de este proveedor, si vuelve a fallar con 404 "no
-    # longer available", corre `client.models.list()` para ver el catálogo
-    # vigente de tu proyecto (ver docs/ para el script usado).
+    # --- Groq (proveedor de chat activo por defecto) ---------------------- #
+    # Modelo verificado invocando /chat/completions real con la API key del
+    # proyecto (no solo /models, que lista modelos a los que la cuenta no
+    # necesariamente tiene acceso de inferencia). "openai/gpt-oss-120b" es
+    # un modelo "razonador" open-weight servido por Groq: encaja bien con el
+    # Chain-of-Thought del prompt de auditoría y tiene el mayor contexto
+    # (131K tokens) del catálogo disponible para esta cuenta.
+    groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
+    groq_chat_model: str = field(
+        default_factory=lambda: os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
+    )
+
+    # --- Embeddings locales (proveedor de embeddings activo por defecto) - #
+    # Sin llamadas de red ni costo: corre en CPU vía sentence-transformers.
+    # Evita además depender de una cuenta de Google que puede quedar
+    # bloqueada (ver nota de vigencia del módulo).
+    local_embedding_model: str = field(
+        default_factory=lambda: os.getenv(
+            "LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+        )
+    )
+
+    # --- Google AI Studio / Gemini (se mantiene disponible para uso futuro) #
     google_api_key: str = field(default_factory=lambda: os.getenv("GOOGLE_API_KEY", ""))
     google_chat_model: str = field(
         default_factory=lambda: os.getenv("GOOGLE_CHAT_MODEL", "gemini-3.6-flash")
@@ -86,6 +116,9 @@ class Settings:
         default_factory=lambda: os.getenv(
             "GITHUB_ENDPOINT", "https://models.inference.ai.azure.com"
         )
+    )
+    github_embedding_model: str = field(
+        default_factory=lambda: os.getenv("GITHUB_EMBEDDING_MODEL", "text-embedding-3-small")
     )
 
     # --- Parámetros de generación ----------------------------------------- #
@@ -108,13 +141,13 @@ class Settings:
         default_factory=lambda: float(os.getenv("JUDGE_MIN_SCORE", "6.0"))
     )
 
-    def validate(self) -> None:
-        """Valida que existan las credenciales necesarias para el proveedor activo.
-
-        Se llama explícitamente antes de instanciar clientes LLM reales (no en
-        `__init__`) para que el resto del código (loaders, chunking, métricas
-        deterministas, tests) pueda importarse y ejecutarse sin credenciales.
-        """
+    def validate_chat(self) -> None:
+        """Valida que existan las credenciales necesarias para el proveedor de CHAT activo."""
+        if self.llm_provider == "groq" and not self.groq_api_key:
+            raise EnvironmentError(
+                "Falta GROQ_API_KEY en el entorno (.env). Obtén una clave en "
+                "https://console.groq.com/keys y cópiala en tu .env local."
+            )
         if self.llm_provider == "google" and not self.google_api_key:
             raise EnvironmentError(
                 "Falta GOOGLE_API_KEY en el entorno (.env). Obtén una clave en "
@@ -127,6 +160,23 @@ class Settings:
                 "'github'."
             )
 
+    def validate_embeddings(self) -> None:
+        """Valida que existan las credenciales necesarias para el proveedor de EMBEDDINGS activo."""
+        if self.embedding_provider == "google" and not self.google_api_key:
+            raise EnvironmentError(
+                "Falta GOOGLE_API_KEY en el entorno (.env) para usar embeddings de Google."
+            )
+        if self.embedding_provider == "github" and not self.github_token:
+            raise EnvironmentError(
+                "Falta GITHUB_TOKEN en el entorno (.env) para usar embeddings de GitHub Models."
+            )
+        # "local" no requiere credenciales: corre con sentence-transformers en CPU.
+
+    def validate(self) -> None:
+        """Valida credenciales de AMBOS proveedores (chat + embeddings). Conveniencia."""
+        self.validate_chat()
+        self.validate_embeddings()
+
 
 settings = Settings()
 
@@ -135,10 +185,20 @@ def get_chat_model(provider: LLMProvider | None = None):
     """Instancia y retorna el chat model del proveedor solicitado.
 
     Aislado aquí para que `rag_pipeline.py`, `fact_checking.py`, etc. nunca
-    importen directamente `langchain_google_genai` ni `langchain_openai`.
+    importen directamente `langchain_groq`, `langchain_google_genai` ni
+    `langchain_openai`.
     """
     provider = provider or settings.llm_provider
-    settings.validate()
+    settings.validate_chat()
+
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model=settings.groq_chat_model,
+            temperature=settings.temperature,
+            api_key=settings.groq_api_key,
+        )
 
     if provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -163,10 +223,22 @@ def get_chat_model(provider: LLMProvider | None = None):
     raise ValueError(f"Proveedor de LLM no soportado: {provider!r}")
 
 
-def get_embeddings(provider: LLMProvider | None = None):
-    """Instancia y retorna el modelo de embeddings del proveedor solicitado."""
-    provider = provider or settings.llm_provider
-    settings.validate()
+def get_embeddings(provider: EmbeddingProvider | None = None):
+    """Instancia y retorna el modelo de embeddings del proveedor solicitado.
+
+    Nota: independiente de `get_chat_model()`. Groq (proveedor de chat por
+    defecto) no ofrece API de embeddings, por eso el default aquí es
+    "local" y se resuelve contra `settings.embedding_provider`, no contra
+    `settings.llm_provider`.
+    """
+    provider = provider or settings.embedding_provider
+    settings.validate_embeddings()
+
+    if provider == "local":
+        # Sin red ni costo: descarga el modelo una vez (~90 MB) y corre en CPU.
+        from langchain_huggingface import HuggingFaceEmbeddings
+
+        return HuggingFaceEmbeddings(model_name=settings.local_embedding_model)
 
     if provider == "google":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -182,7 +254,7 @@ def get_embeddings(provider: LLMProvider | None = None):
         from langchain_openai import OpenAIEmbeddings
 
         return OpenAIEmbeddings(
-            model=os.getenv("GITHUB_EMBEDDING_MODEL", "text-embedding-3-small"),
+            model=settings.github_embedding_model,
             api_key=settings.github_token,
             base_url=settings.github_endpoint,
         )

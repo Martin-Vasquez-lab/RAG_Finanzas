@@ -9,7 +9,7 @@ flowchart TD
     subgraph Ingesta["Ingesta offline (src/loaders.py)"]
         RAW[("data/raw/\nfacturas, notas de crédito,\nestados de resultados, balances")] --> SPLIT["RecursiveCharacterTextSplitter\n(chunk_size=1200, overlap=200,\nseparadores anti-corte de tablas)"]
         SPLIT --> META["Metadatos por chunk:\nsource, page, fecha_ingesta,\ntipo_documento, chunk_id"]
-        META --> EMB["Embeddings\nGoogle gemini-embedding-001"]
+        META --> EMB["Embeddings locales\nsentence-transformers\n(CPU, sin API)"]
         EMB --> IDX[("Índice FAISS\nvectorstore/")]
     end
 
@@ -17,7 +17,7 @@ flowchart TD
         R["Retriever FAISS\n(top-k=8)"] --> J["LLM-as-a-Judge\n(filtra chunks < score 6/10)"]
         J --> CTX["Contexto citable\n<contexto_auditoria>"]
         CTX --> P["ChatPromptTemplate\n(rol Auditor Senior +\nfew-shot + CoT +\nguardrails XML)"]
-        P --> LLM["Gemini Flash\n(temperature=0.0)"]
+        P --> LLM["Groq: openai/gpt-oss-120b\n(temperature=0.0)"]
         LLM --> OUT["Parser Pydantic estricto\nInformeAuditoria"]
     end
 
@@ -39,7 +39,7 @@ flowchart TD
 | Componente | Módulo | Responsabilidad |
 |---|---|---|
 | Ingesta y chunking | `src/loaders.py` | Carga PDF/TXT, fragmenta sin cortar tablas financieras, adjunta metadatos de trazabilidad, construye/persiste FAISS. |
-| Configuración y proveedor LLM | `src/config.py` | Único punto de conexión a Google AI Studio/Gemini (o GitHub Models como alternativa), parámetros centrales. |
+| Configuración y proveedores | `src/config.py` | Único punto de conexión a LLM (Groq por defecto; Google AI Studio/Gemini y GitHub Models disponibles como alternativa) y a embeddings (local vía sentence-transformers por defecto; Google/GitHub como alternativa), parámetros centrales. |
 | Prompts | `src/prompts.py` | Rol experto, few-shot con delimitadores, Chain-of-Thought explícito, guardrails XML anti-alucinación. |
 | Orquestación RAG | `src/rag_pipeline.py` | Ensambla `retriever \| LLM-judge \| prompt \| model \| parser` vía LCEL; expone `AuditRagPipeline`. |
 | Verificación fáctica | `src/fact_checking.py` | Segunda cadena LLM que clasifica cada afirmación de la respuesta contra el contexto. |

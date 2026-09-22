@@ -59,7 +59,7 @@ pip install -r requirements.txt
 
 ## Variables de entorno
 
-Copia `.env.example` a `.env` y completa tu clave de Google AI Studio:
+Copia `.env.example` a `.env` y completa tu clave de Groq:
 
 ```bash
 cp .env.example .env
@@ -67,10 +67,12 @@ cp .env.example .env
 
 | Variable | Requerida | Descripción |
 |---|---|---|
-| `GOOGLE_API_KEY` | Sí (proveedor `google`, el usado por defecto) | Clave de [Google AI Studio](https://aistudio.google.com/app/apikey). |
-| `LLM_PROVIDER` | No (default `google`) | `google` o `github`, ver justificación abajo. |
-| `GOOGLE_CHAT_MODEL` | No (default `gemini-3.6-flash`) | Modelo de generación. |
-| `GOOGLE_EMBEDDING_MODEL` | No (default `models/gemini-embedding-001`) | Modelo de embeddings. |
+| `GROQ_API_KEY` | Sí (proveedor de chat activo por defecto: `groq`) | Clave de [Groq Console](https://console.groq.com/keys). |
+| `LLM_PROVIDER` | No (default `groq`) | `groq`, `google` o `github` — proveedor de **chat**, ver abajo. |
+| `GROQ_CHAT_MODEL` | No (default `openai/gpt-oss-120b`) | Modelo de generación servido por Groq. |
+| `EMBEDDING_PROVIDER` | No (default `local`) | `local`, `google` o `github` — proveedor de **embeddings**, independiente del de chat. |
+| `LOCAL_EMBEDDING_MODEL` | No (default `sentence-transformers/all-MiniLM-L6-v2`) | Modelo de embeddings local (CPU, sin API). |
+| `GOOGLE_API_KEY` / `GOOGLE_CHAT_MODEL` / `GOOGLE_EMBEDDING_MODEL` | Solo si usas `google` en `LLM_PROVIDER` o `EMBEDDING_PROVIDER` | Ver justificación abajo. |
 | `TEMPERATURE` | No (default `0.0`) | Determinismo exigido para un dominio de auditoría. |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | No (default `1200`/`200`) | Ver justificación en `src/loaders.py`. |
 | `RETRIEVER_K` | No (default `8`) | Top-k de chunks recuperados antes del filtro LLM-judge. |
@@ -78,39 +80,52 @@ cp .env.example .env
 
 **Nunca subas tu `.env` real al repositorio** (`.gitignore` ya lo excluye).
 
-### Sobre el proveedor de LLM
+### Sobre los proveedores de LLM/embeddings
 
-El curso enseña dos patrones de conexión: **GitHub Models** (usado en los
-notebooks de clase) y **Google AI Studio/Gemini**. El enunciado del EP1 pide
-explícitamente `text-embedding-004` + Gemini, por lo que ese es el proveedor
-activo por defecto. Toda la lógica de conexión vive aislada en
-`src/config.py` (`get_chat_model()` / `get_embeddings()`), de modo que
-cambiar a `LLM_PROVIDER=github` en `.env` no requiere tocar ningún otro
-archivo del pipeline.
+El proveedor de **chat** y el de **embeddings** se configuran por separado
+(`LLM_PROVIDER` / `EMBEDDING_PROVIDER`), porque no todos los proveedores
+ofrecen ambas capacidades:
 
-> **Nota de vigencia (importante para la entrega):** `text-embedding-004`,
-> `gemini-1.5-flash` y, poco después, `gemini-2.5-flash` (nombres que en
-> algún momento documentó el enunciado o parecían vigentes) fueron
-> **retirados** del catálogo de Google AI Studio para proyectos nuevos. Se
-> verificó invocando la API directamente (SDK `google-genai`, el que usa
-> `langchain-google-genai>=4`, no el `google-generativeai` legacy) cuáles
-> nombres responden hoy, y se actualizaron los defaults a
-> `gemini-3.6-flash` + `models/gemini-embedding-001`. Vale la pena
-> mencionar este cambio en el informe como parte de las "limitaciones del
-> modelo utilizado" (IL1.4): los proveedores de LLM deprecan modelos con
-> relativa frecuencia, y el pipeline está diseñado para que ese cambio sea
-> solo una variable de entorno, no una reescritura de código.
+- **Chat activo por defecto: Groq** (`LLM_PROVIDER=groq`), rápido y con tier
+  gratuito. El modelo, `openai/gpt-oss-120b`, es un modelo "razonador" de
+  pesos abiertos servido por Groq — encaja con el diseño Chain-of-Thought
+  del prompt de auditoría.
+- **Embeddings activos por defecto: locales** (`EMBEDDING_PROVIDER=local`),
+  vía `sentence-transformers` corriendo en CPU. **Groq no ofrece API de
+  embeddings**, así que el pipeline no depende de ningún proveedor externo
+  para esa etapa — sin costo, sin llamadas de red, sin cuotas.
+- **Google AI Studio/Gemini** (el proveedor que exige explícitamente el
+  enunciado del EP1, con `text-embedding-004` + Gemini) **se mantiene
+  disponible e íntegro** en `src/config.py` para uso futuro: basta con
+  `LLM_PROVIDER=google` y/o `EMBEDDING_PROVIDER=google` en `.env`.
+- **GitHub Models** (patrón usado en los notebooks de clase) también sigue
+  disponible como alternativa para chat y embeddings.
+
+Toda la lógica de conexión vive aislada en `src/config.py`
+(`get_chat_model()` / `get_embeddings()`), de modo que cambiar de proveedor
+es solo una variable de entorno, nunca una reescritura de código.
+
+> **Nota de vigencia (importante para la entrega):** durante el desarrollo,
+> varios nombres de modelo que en algún momento parecían vigentes dejaron
+> de estarlo: en Google, `text-embedding-004`, `gemini-1.5-flash` y luego
+> `gemini-2.5-flash`; en Groq, `llama-3.3-70b-versatile`. En ambos casos se
+> verificó el catálogo real invocando la API directamente antes de fijar un
+> nombre en el código (`client.models.list()` para Google vía SDK
+> `google-genai`; `GET /openai/v1/models` + una llamada real a
+> `/chat/completions` para Groq, ya que `/models` puede listar modelos sin
+> acceso real de inferencia para la cuenta). Vale la pena mencionar esto en
+> el informe como parte de las "limitaciones del modelo utilizado" (IL1.4).
 >
-> **Aparte de lo anterior**, si al ejecutar el pipeline obtienes
+> Además, si alguna vez usas el proveedor `google` y obtienes
 > `403 PERMISSION_DENIED: Your project has been denied access` con
-> CUALQUIER modelo (chat o embeddings), ya no es un problema de nombre de
-> modelo: es un bloqueo a nivel del proyecto de Google Cloud/AI Studio
-> asociado a tu `GOOGLE_API_KEY` (posibles causas: falta de facturación
-> habilitada, el proyecto quedó marcado/suspendido, o restricciones propias
-> de la cuenta). La solución no es de código: genera una API key nueva
-> desde un proyecto distinto en <https://aistudio.google.com/app/apikey>,
-> revisa el estado de facturación/cuota en Google Cloud Console, o
-> contacta al soporte de Google como indica el mensaje de error.
+> CUALQUIER modelo, no es un problema de nombre de modelo: es un bloqueo a
+> nivel del proyecto de Google Cloud/AI Studio asociado a esa
+> `GOOGLE_API_KEY` (posibles causas: falta de facturación habilitada, el
+> proyecto quedó marcado/suspendido, o restricciones propias de la cuenta).
+> La solución no es de código: genera una API key nueva desde un proyecto
+> distinto, revisa el estado de facturación/cuota en Google Cloud Console,
+> o contacta al soporte de Google como indica el mensaje de error. Por eso
+> el proveedor de chat activo por defecto en este proyecto es Groq.
 
 ## Cómo correr el pipeline
 
@@ -151,13 +166,17 @@ pytest -v
 Los tests están divididos según su dependencia de credenciales:
 
 - `tests/test_loaders.py`, `tests/test_metrics.py`, `tests/test_prompts.py`,
-  `tests/test_benchmark.py`: **deterministas, no requieren `GOOGLE_API_KEY`**.
-  `test_benchmark.py` valida, con Exact Match y RegEx, la extracción de RUT y
-  montos CLP contra `tests/ground_truth.json` sobre los documentos reales de
-  `data/raw/`.
+  `tests/test_benchmark.py`: **deterministas, no requieren ninguna API key**
+  (ni siquiera de embeddings: `load_raw_documents`/`split_documents` no
+  llaman a ningún proveedor). `test_benchmark.py` valida, con Exact Match y
+  RegEx, la extracción de RUT y montos CLP contra `tests/ground_truth.json`
+  sobre los documentos reales de `data/raw/`.
+- Construir el índice FAISS (`python -m src.loaders`) usa embeddings
+  **locales** por defecto: no requiere ninguna API key.
 - La ejecución completa del pipeline contra el LLM real (`src/rag_pipeline.py`
-  ejecutado como script, o las celdas del notebook que llaman a Gemini)
-  **sí requiere** `GOOGLE_API_KEY` configurada.
+  ejecutado como script, o las celdas del notebook que llaman al modelo)
+  **sí requiere** `GROQ_API_KEY` configurada (o `GOOGLE_API_KEY`/`GITHUB_TOKEN`
+  si cambias `LLM_PROVIDER`).
 
 ## Métricas de evaluación RAG
 
