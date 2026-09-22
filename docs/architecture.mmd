@@ -1,0 +1,29 @@
+flowchart TD
+    U[Usuario / Auditor] -->|Pregunta en lenguaje natural| R
+
+    subgraph Ingesta["Ingesta offline (src/loaders.py)"]
+        RAW[("data/raw/\nfacturas, notas de crédito,\nestados de resultados, balances")] --> SPLIT["RecursiveCharacterTextSplitter\n(chunk_size=1200, overlap=200,\nseparadores anti-corte de tablas)"]
+        SPLIT --> META["Metadatos por chunk:\nsource, page, fecha_ingesta,\ntipo_documento, chunk_id"]
+        META --> EMB["Embeddings\nGoogle text-embedding-004"]
+        EMB --> IDX[("Índice FAISS\nvectorstore/")]
+    end
+
+    subgraph Consulta["Consulta online (src/rag_pipeline.py)"]
+        R["Retriever FAISS\n(top-k=8)"] --> J["LLM-as-a-Judge\n(filtra chunks < score 6/10)"]
+        J --> CTX["Contexto citable\n<contexto_auditoria>"]
+        CTX --> P["ChatPromptTemplate\n(rol Auditor Senior +\nfew-shot + CoT +\nguardrails XML)"]
+        P --> LLM["Gemini Flash\n(temperature=0.0)"]
+        LLM --> OUT["Parser Pydantic estricto\nInformeAuditoria"]
+    end
+
+    subgraph Verificacion["Verificación (src/fact_checking.py + src/metrics.py)"]
+        OUT --> FC["Cadena de Fact-Checking\n[Soportado]/[Contradictorio]/[No Mencionado]"]
+        FC --> MET["Métricas RAG\ncontext_precision, context_recall,\nfaithfulness, answer_relevancy"]
+        LLM --> CB["AuditCallbackHandler\nlatencia, tokens, costo estimado"]
+    end
+
+    IDX --> R
+    OUT --> RESP[Respuesta estructurada + trazabilidad]
+    MET --> RESP
+    CB --> RESP
+    RESP --> U

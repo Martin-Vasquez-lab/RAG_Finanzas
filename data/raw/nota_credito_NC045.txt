@@ -1,0 +1,18 @@
+NOTA DE CRÉDITO
+Folio: NC-045
+Fecha de emisión: 2025-05-02
+Emisor: Distribuidora Norte SpA
+RUT Emisor: 77.888.999-1
+Receptor: Banco Andino S.A.
+RUT Receptor: 11.222.333-4
+
+Motivo: Anulación parcial de factura F-3390 por diferencia de precio.
+Monto total: $5.000.000 CLP
+
+ALERTA DE CONTROL INTERNO:
+Se detectó que la Nota de Crédito NC-045 fue emitida en 3 ocasiones distintas
+(NC-045, NC-045-B, NC-045-C) por exactamente el mismo monto ($5.000.000 CLP)
+dentro de una ventana de 24 horas (entre las 09:14 y las 22:47 del 2025-05-02),
+todas asociadas al mismo RUT receptor 11.222.333-4. El área de cumplimiento
+tributario marcó estos documentos como "revisión pendiente" por posible
+duplicidad o fraccionamiento indebido.

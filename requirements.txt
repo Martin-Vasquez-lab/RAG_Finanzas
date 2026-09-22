@@ -1,0 +1,26 @@
+# --- Núcleo LangChain / LCEL -------------------------------------------- #
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+
+# --- Proveedor de LLM/embeddings exigido por el enunciado (Google AI Studio) #
+langchain-google-genai>=2.0.0
+
+# --- Proveedor alternativo (GitHub Models, patrón usado en los notebooks) - #
+langchain-openai>=0.2.0
+
+# --- Vector store ---------------------------------------------------------- #
+faiss-cpu>=1.8.0
+
+# --- Esquemas de salida estructurada --------------------------------------- #
+pydantic>=2.7.0
+
+# --- Configuración ---------------------------------------------------------- #
+python-dotenv>=1.0.0
+
+# --- Carga de documentos ------------------------------------------------- #
+pypdf>=4.0.0
+
+# --- Tests ------------------------------------------------------------------ #
+pytest>=8.0.0

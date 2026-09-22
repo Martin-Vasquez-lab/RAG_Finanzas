@@ -1,0 +1,20 @@
+INFORME DE RIESGO Y ESTADO DE RESULTADOS
+Período: Segundo Trimestre 2025 (Q2 2025)
+Área emisora: Auditoría Interna y Cumplimiento Tributario
+Institución: Banco Andino S.A.
+
+Estado de resultados Q2 2025:
+Ingresos operacionales: $980.000.000 CLP
+Costos operacionales: $612.000.000 CLP
+Resultado operacional: $368.000.000 CLP
+
+Resumen de hallazgos de riesgo del trimestre:
+1. Nota de crédito NC-045 (y duplicados NC-045-B, NC-045-C): riesgo ALTO por
+   emisión múltiple del mismo monto en 24 horas. Ver documento asociado.
+2. Factura F-1023: sin hallazgos, documentación completa y coherente con
+   orden de compra OC-4471. Riesgo BAJO.
+3. Balance trimestral pendiente de conciliación con tesorería al cierre de
+   este informe; no se reportan RUT ni montos adicionales en este documento.
+
+Conclusión del área: se recomienda escalar NC-045 y sus duplicados a
+revisión de cumplimiento normativo antes del cierre del trimestre.

@@ -1,0 +1,17 @@
+FACTURA ELECTRÓNICA
+Folio: F-1023
+Fecha de emisión: 2025-04-12
+Emisor: Comercial Rios Ltda.
+RUT Emisor: 76.123.456-7
+Receptor: Banco Andino S.A.
+RUT Receptor: 90.111.222-3
+
+Detalle:
+Concepto: Servicios de mantenimiento de infraestructura TI - Abril 2025
+Cantidad: 1
+Monto neto: $1.045.798 CLP
+IVA (19%): $199.202 CLP
+Monto total: $1.245.000 CLP
+
+Forma de pago: Transferencia electrónica, 30 días
+Observaciones: Factura asociada a orden de compra OC-4471. Sin observaciones de auditoría previas.

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "F-1023",
+    "source_file": "factura_electronica_F1023.txt",
+    "pregunta": "¿Cuál es el RUT del emisor y el monto total de la factura F-1023?",
+    "expected_rut": "76.123.456-7",
+    "expected_monto_clp": 1245000,
+    "expected_nivel_riesgo": "bajo"
+  },
+  {
+    "id": "NC-045",
+    "source_file": "nota_credito_NC045.txt",
+    "pregunta": "¿Cuál es el RUT del receptor y el monto total de la nota de crédito NC-045?",
+    "expected_rut": "11.222.333-4",
+    "expected_monto_clp": 5000000,
+    "expected_nivel_riesgo": "alto"
+  },
+  {
+    "id": "Q2-2025-RESULTADO",
+    "source_file": "informe_riesgo_Q2_2025.txt",
+    "pregunta": "¿Cuál es el resultado operacional del Q2 2025?",
+    "expected_rut": null,
+    "expected_monto_clp": 368000000,
+    "expected_nivel_riesgo": "no_aplica"
+  }
+]

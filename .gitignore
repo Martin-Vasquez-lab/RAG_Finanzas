@@ -1,0 +1,44 @@
+# --- Entornos virtuales ---------------------------------------------------- #
+venv/
+.venv/
+env/
+ENV/
+
+# --- Python ----------------------------------------------------------------- #
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Variables de entorno / secretos ---------------------------------------- #
+.env
+*.env.local
+
+# --- Índice vectorial (se regenera con `python -m src.loaders`) ------------- #
+vectorstore/*.faiss
+vectorstore/*.pkl
+!vectorstore/.gitkeep
+
+# --- Datos procesados intermedios -------------------------------------------- #
+data/processed/*
+!data/processed/.gitkeep
+
+# --- Cachés de tests / cobertura --------------------------------------------- #
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- IDE / SO ----------------------------------------------------------------- #
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Configuración local de Claude Code (no es parte del proyecto) ----------- #
+.claude/
+
+# --- Jupyter ------------------------------------------------------------------- #
+.ipynb_checkpoints/
