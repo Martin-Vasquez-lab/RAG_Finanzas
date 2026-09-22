@@ -56,12 +56,25 @@ class Settings:
     )
 
     # --- Google AI Studio / Gemini (proveedor exigido por el enunciado) -- #
+    # NOTA: "gemini-1.5-flash" y "text-embedding-004" (los nombres que
+    # documentaba originalmente el enunciado) fueron retirados del catálogo
+    # de modelos de Google AI Studio. "gemini-2.5-flash" también dejó de
+    # estar disponible para proyectos nuevos poco después. Se verificó
+    # invocando `generate_content`/`embed_content` directo (SDK
+    # `google-genai`, el que usa `langchain-google-genai>=4`) cuáles nombres
+    # responden hoy: chat -> "gemini-3.6-flash" (el que la propia API de
+    # Google recomienda en el mensaje de error de modelos retirados) y
+    # embeddings -> "models/gemini-embedding-001". Si tu cuenta tiene acceso
+    # a otros modelos, sobrescribe vía .env sin tocar código. Dado el ritmo
+    # de deprecación de este proveedor, si vuelve a fallar con 404 "no
+    # longer available", corre `client.models.list()` para ver el catálogo
+    # vigente de tu proyecto (ver docs/ para el script usado).
     google_api_key: str = field(default_factory=lambda: os.getenv("GOOGLE_API_KEY", ""))
     google_chat_model: str = field(
-        default_factory=lambda: os.getenv("GOOGLE_CHAT_MODEL", "gemini-1.5-flash")
+        default_factory=lambda: os.getenv("GOOGLE_CHAT_MODEL", "gemini-3.6-flash")
     )
     google_embedding_model: str = field(
-        default_factory=lambda: os.getenv("GOOGLE_EMBEDDING_MODEL", "models/text-embedding-004")
+        default_factory=lambda: os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-001")
     )
 
     # --- GitHub Models (alternativa vista en los notebooks del curso) ---- #

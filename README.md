@@ -69,8 +69,8 @@ cp .env.example .env
 |---|---|---|
 | `GOOGLE_API_KEY` | Sí (proveedor `google`, el usado por defecto) | Clave de [Google AI Studio](https://aistudio.google.com/app/apikey). |
 | `LLM_PROVIDER` | No (default `google`) | `google` o `github`, ver justificación abajo. |
-| `GOOGLE_CHAT_MODEL` | No (default `gemini-1.5-flash`) | Modelo de generación. |
-| `GOOGLE_EMBEDDING_MODEL` | No (default `models/text-embedding-004`) | Modelo de embeddings. |
+| `GOOGLE_CHAT_MODEL` | No (default `gemini-3.6-flash`) | Modelo de generación. |
+| `GOOGLE_EMBEDDING_MODEL` | No (default `models/gemini-embedding-001`) | Modelo de embeddings. |
 | `TEMPERATURE` | No (default `0.0`) | Determinismo exigido para un dominio de auditoría. |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | No (default `1200`/`200`) | Ver justificación en `src/loaders.py`. |
 | `RETRIEVER_K` | No (default `8`) | Top-k de chunks recuperados antes del filtro LLM-judge. |
@@ -87,6 +87,30 @@ activo por defecto. Toda la lógica de conexión vive aislada en
 `src/config.py` (`get_chat_model()` / `get_embeddings()`), de modo que
 cambiar a `LLM_PROVIDER=github` en `.env` no requiere tocar ningún otro
 archivo del pipeline.
+
+> **Nota de vigencia (importante para la entrega):** `text-embedding-004`,
+> `gemini-1.5-flash` y, poco después, `gemini-2.5-flash` (nombres que en
+> algún momento documentó el enunciado o parecían vigentes) fueron
+> **retirados** del catálogo de Google AI Studio para proyectos nuevos. Se
+> verificó invocando la API directamente (SDK `google-genai`, el que usa
+> `langchain-google-genai>=4`, no el `google-generativeai` legacy) cuáles
+> nombres responden hoy, y se actualizaron los defaults a
+> `gemini-3.6-flash` + `models/gemini-embedding-001`. Vale la pena
+> mencionar este cambio en el informe como parte de las "limitaciones del
+> modelo utilizado" (IL1.4): los proveedores de LLM deprecan modelos con
+> relativa frecuencia, y el pipeline está diseñado para que ese cambio sea
+> solo una variable de entorno, no una reescritura de código.
+>
+> **Aparte de lo anterior**, si al ejecutar el pipeline obtienes
+> `403 PERMISSION_DENIED: Your project has been denied access` con
+> CUALQUIER modelo (chat o embeddings), ya no es un problema de nombre de
+> modelo: es un bloqueo a nivel del proyecto de Google Cloud/AI Studio
+> asociado a tu `GOOGLE_API_KEY` (posibles causas: falta de facturación
+> habilitada, el proyecto quedó marcado/suspendido, o restricciones propias
+> de la cuenta). La solución no es de código: genera una API key nueva
+> desde un proyecto distinto en <https://aistudio.google.com/app/apikey>,
+> revisa el estado de facturación/cuota en Google Cloud Console, o
+> contacta al soporte de Google como indica el mensaje de error.
 
 ## Cómo correr el pipeline
 

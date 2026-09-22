@@ -4,7 +4,7 @@ flowchart TD
     subgraph Ingesta["Ingesta offline (src/loaders.py)"]
         RAW[("data/raw/\nfacturas, notas de crédito,\nestados de resultados, balances")] --> SPLIT["RecursiveCharacterTextSplitter\n(chunk_size=1200, overlap=200,\nseparadores anti-corte de tablas)"]
         SPLIT --> META["Metadatos por chunk:\nsource, page, fecha_ingesta,\ntipo_documento, chunk_id"]
-        META --> EMB["Embeddings\nGoogle text-embedding-004"]
+        META --> EMB["Embeddings\nGoogle gemini-embedding-001"]
         EMB --> IDX[("Índice FAISS\nvectorstore/")]
     end
 

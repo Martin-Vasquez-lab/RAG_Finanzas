@@ -80,8 +80,8 @@ class FactCheckReport(BaseModel):
 # de pricing vigente: en producción esto debería leerse de una config externa
 # actualizable sin tocar código.
 PRICING_USD_PER_1K_TOKENS: dict[str, dict[str, float]] = {
-    "gemini-1.5-flash": {"input": 0.000075, "output": 0.00030},
-    "gemini-1.5-pro": {"input": 0.00125, "output": 0.00500},
+    "gemini-3.6-flash": {"input": 0.000075, "output": 0.00030},
+    "gemini-2.5-pro": {"input": 0.00125, "output": 0.00500},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
     "_default": {"input": 0.0005, "output": 0.0015},
 }
