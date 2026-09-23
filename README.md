@@ -17,6 +17,14 @@ resultados, balances trimestrales e informes de riesgo.
   el fragmento textual exacto que la respalda.
 - **Latencia y costo de tokens**: un callback (`AuditCallbackHandler`)
   registra latencia, tokens y costo estimado de cada llamada al LLM.
+- **Fuentes de datos internas y externas** (`src/external_data.py`): además
+  del índice FAISS sobre `data/raw/` (fuente interna), el pipeline consulta
+  en vivo la API pública **mindicador.cl** (UF, dólar, UTM del día) como
+  fuente externa, para resolver preguntas que requieren convertir montos en
+  UF/USD a CLP. Si la fuente externa falla (timeout, caída), el pipeline
+  degrada con gracia y sigue respondiendo solo con la fuente interna — ver
+  evidencia de un caso real de esto en
+  [`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md).
 
 Ver [`docs/architecture.md`](docs/architecture.md) para el diagrama de
 arquitectura completo y la justificación de decisiones.
@@ -28,19 +36,25 @@ README.md
 requirements.txt
 .env.example
 conftest.py
-data/raw/            # Documentos fuente (3 ejemplos sintéticos incluidos)
-data/processed/       # Artefactos intermedios (vacío, generado en ejecución)
-vectorstore/          # Índice FAISS persistido (generado, no versionado)
-notebooks/             # Notebook de demo end-to-end
+data/raw/                    # Documentos fuente (4 ejemplos sintéticos: factura,
+                              # nota de crédito, informe de riesgo, contrato en UF)
+data/processed/               # Artefactos intermedios (vacío, generado en ejecución)
+vectorstore/                  # Índice FAISS persistido (generado, no versionado)
+notebooks/                     # Notebook de demo end-to-end
 src/
-  config.py            # Conexión a LLM/embeddings (Google Gemini / GitHub Models)
-  loaders.py            # Ingesta, chunking, construcción del índice FAISS
-  prompts.py            # Plantillas: rol experto, few-shot, CoT, guardrails XML
-  rag_pipeline.py        # Ensamblado LCEL: retriever | judge | prompt | LLM | parser
-  metrics.py              # Callback de costo/latencia + 4 métricas RAG + esquemas Pydantic
-  fact_checking.py         # Cadena secundaria de verificación fáctica
-tests/                     # Benchmarking determinista (Exact Match + RegEx) y unit tests
-docs/                       # Diagrama de arquitectura (Mermaid) y notas de diseño
+  config.py                    # Conexión a LLM (Groq / Google / GitHub) y embeddings (local / Google / GitHub)
+  loaders.py                    # Ingesta, chunking, construcción del índice FAISS (fuente INTERNA)
+  external_data.py               # Fuente EXTERNA: API mindicador.cl (UF/dólar/UTM), degrada con gracia
+  prompts.py                      # Plantillas: rol experto, few-shot, CoT, guardrails XML
+  rag_pipeline.py                  # Ensamblado LCEL: retriever | judge | fuente externa | prompt | LLM | parser
+  metrics.py                        # Callback de costo/latencia + 4 métricas RAG + esquemas Pydantic
+  fact_checking.py                   # Cadena secundaria de verificación fáctica
+tests/
+  test_*.py                           # Suite automática determinista (pytest, sin costo de API)
+  manual_benchmark_groq.py             # Benchmark MANUAL contra Groq real (evidencia de pruebas)
+docs/
+  architecture.md / .mmd               # Diagrama de arquitectura (Mermaid) y justificación de decisiones
+  evidencia_pruebas.md                  # Evidencia de la última corrida real (consumo de API, casos destacados)
 ```
 
 ## Instalación
@@ -86,14 +100,35 @@ El proveedor de **chat** y el de **embeddings** se configuran por separado
 (`LLM_PROVIDER` / `EMBEDDING_PROVIDER`), porque no todos los proveedores
 ofrecen ambas capacidades:
 
-- **Chat activo por defecto: Groq** (`LLM_PROVIDER=groq`), rápido y con tier
-  gratuito. El modelo, `openai/gpt-oss-120b`, es un modelo "razonador" de
+- **Chat activo por defecto: Groq** (`LLM_PROVIDER=groq`). Tres razones
+  concretas para esta elección:
+  1. **Costo**: la corrida real de pruebas documentada en
+     [`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md) costó
+     ≈$0,0085 USD por ~30 llamadas (25 preguntas de auditoría completas +
+     reintentos) — economía suficiente para iterar sin preocuparse por
+     cuota durante el desarrollo y las pruebas de este proyecto.
+  2. **Sin bloqueo de facturación**: el proyecto de Google Cloud asociado a
+     la cuenta usada originalmente quedó bloqueado con
+     `403 PERMISSION_DENIED: Your project has been denied access`
+     independientemente del modelo invocado (ver nota de vigencia abajo);
+     Groq no exige tarjeta de crédito ni facturación habilitada para su
+     tier gratuito.
+  3. **Compatibilidad con el patrón OpenAI del propio curso**: el endpoint
+     de Groq es compatible con la API de OpenAI (mismo formato de
+     `chat.completions`), el mismo patrón que ya usa GitHub Models en los
+     notebooks de la asignatura — cambiar entre ambos es trivial y no
+     introduce un SDK nuevo que aprender.
+  El modelo, `openai/gpt-oss-120b`, es además un modelo "razonador" de
   pesos abiertos servido por Groq — encaja con el diseño Chain-of-Thought
   del prompt de auditoría.
 - **Embeddings activos por defecto: locales** (`EMBEDDING_PROVIDER=local`),
-  vía `sentence-transformers` corriendo en CPU. **Groq no ofrece API de
-  embeddings**, así que el pipeline no depende de ningún proveedor externo
-  para esa etapa — sin costo, sin llamadas de red, sin cuotas.
+  vía `sentence-transformers` (`all-MiniLM-L6-v2`) corriendo en CPU, **no
+  Gemini**. Dos razones: (a) **Groq no ofrece API de embeddings**, así que
+  de todas formas se necesitaba un segundo proveedor solo para esa etapa; y
+  (b) al ejecutar embeddings localmente, esa etapa del pipeline no depende
+  de ningún proveedor externo — sin costo, sin llamadas de red, sin cuotas,
+  y sin el riesgo de bloqueo de cuenta que sí afectó a Google (punto 2
+  arriba).
 - **Google AI Studio/Gemini** (el proveedor que exige explícitamente el
   enunciado del EP1, con `text-embedding-004` + Gemini) **se mantiene
   disponible e íntegro** en `src/config.py` para uso futuro: basta con
@@ -129,9 +164,10 @@ es solo una variable de entorno, nunca una reescritura de código.
 
 ## Cómo correr el pipeline
 
-1. **Construir el índice** a partir de `data/raw/` (incluye 3 documentos
+1. **Construir el índice** a partir de `data/raw/` (incluye 4 documentos
    sintéticos de ejemplo: una factura, una nota de crédito con alerta de
-   duplicidad, y un informe de riesgo con estado de resultados):
+   duplicidad, un informe de riesgo con estado de resultados, y un contrato
+   de arriendo en UF para probar la fuente externa):
 
    ```bash
    python -m src.loaders
@@ -157,6 +193,18 @@ es solo una variable de entorno, nunca una reescritura de código.
 3. **Notebook de demo end-to-end**: `notebooks/demo_pipeline.ipynb` recorre
    ingesta -> consulta -> fact-checking -> métricas.
 
+4. **Benchmark manual con evidencia de consumo de API** (gasta cuota real
+   de Groq, no lo corre `pytest` automáticamente):
+
+   ```bash
+   python tests/manual_benchmark_groq.py
+   ```
+
+   Corre 5 preguntas reales (incluyendo el caso guardrail de un documento
+   inexistente y una conversión UF→CLP vía la fuente externa) y resume
+   llamadas/tokens/costo/latencia. El resultado de la última corrida está
+   documentado en [`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md).
+
 ## Cómo correr los tests
 
 ```bash
@@ -166,17 +214,22 @@ pytest -v
 Los tests están divididos según su dependencia de credenciales:
 
 - `tests/test_loaders.py`, `tests/test_metrics.py`, `tests/test_prompts.py`,
-  `tests/test_benchmark.py`: **deterministas, no requieren ninguna API key**
-  (ni siquiera de embeddings: `load_raw_documents`/`split_documents` no
-  llaman a ningún proveedor). `test_benchmark.py` valida, con Exact Match y
-  RegEx, la extracción de RUT y montos CLP contra `tests/ground_truth.json`
-  sobre los documentos reales de `data/raw/`.
+  `tests/test_benchmark.py`, `tests/test_external_data.py`: **deterministas,
+  no requieren ninguna API key ni llamadas de red reales** (ni siquiera de
+  embeddings: `load_raw_documents`/`split_documents` no llaman a ningún
+  proveedor; `test_external_data.py` mockea `requests.get` por completo).
+  `test_benchmark.py` valida, con Exact Match y RegEx, la extracción de RUT
+  y montos CLP contra `tests/ground_truth.json` sobre los documentos reales
+  de `data/raw/`.
 - Construir el índice FAISS (`python -m src.loaders`) usa embeddings
   **locales** por defecto: no requiere ninguna API key.
 - La ejecución completa del pipeline contra el LLM real (`src/rag_pipeline.py`
-  ejecutado como script, o las celdas del notebook que llaman al modelo)
-  **sí requiere** `GROQ_API_KEY` configurada (o `GOOGLE_API_KEY`/`GITHUB_TOKEN`
-  si cambias `LLM_PROVIDER`).
+  ejecutado como script, `tests/manual_benchmark_groq.py`, o las celdas del
+  notebook que llaman al modelo) **sí requiere** `GROQ_API_KEY` configurada
+  (o `GOOGLE_API_KEY`/`GITHUB_TOKEN` si cambias `LLM_PROVIDER`). La fuente
+  externa (`mindicador.cl`) no requiere ninguna API key, pero sí acceso a
+  internet; si no está disponible, el pipeline degrada con gracia (ver
+  `docs/evidencia_pruebas.md` para un caso real de esto).
 
 ## Métricas de evaluación RAG
 

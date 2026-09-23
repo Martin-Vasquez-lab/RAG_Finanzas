@@ -66,7 +66,17 @@ Input: "¿Cuál es el RUT del receptor de la factura F-9999?"
 Contexto disponible: "Factura F-1023 | Emisor: Comercial Rios Ltda. | Monto total: $1.245.000 CLP" (F-9999 no aparece)
 Output:
 ```json
-{"monto_total": null, "divisa": null, "rut_emisor": null, "nivel_riesgo_fraude": "no_determinable", "alertas_detectadas": ["Documento F-9999 no encontrado en el contexto auditado"], "citas_textuales": []}
+{"monto_total": null, "divisa": null, "rut_emisor": null, "nivel_riesgo_fraude": "no_determinable", "alertas_detectadas": ["Documento F-9999 no encontrado en el contexto auditado"], "citas_textuales": [], "fuente_externa_utilizada": false, "uf_referencia_clp": null}
+```
+
+Ejemplo 5 (uso de la fuente EXTERNA para conversión UF -> CLP)
+Input: "La factura F-2100 indica un monto de 30 UF. ¿A cuánto equivale en CLP con el valor de la UF de hoy?"
+Contexto disponible:
+  "[fuente=factura_F2100.txt | chunk_id=0]\nFactura F-2100 | Monto: 30 UF"
+  "[FUENTE EXTERNA: mindicador.cl | fecha=2026-09-22]\n  Unidad de fomento (UF) (uf): 39000.12 Pesos"
+Output:
+```json
+{"monto_total": 1170003.6, "divisa": "CLP", "rut_emisor": null, "nivel_riesgo_fraude": "bajo", "alertas_detectadas": [], "citas_textuales": ["Factura F-2100 | Monto: 30 UF", "Unidad de fomento (UF) (uf): 39000.12 Pesos"], "fuente_externa_utilizada": true, "uf_referencia_clp": 39000.12}
 ```
 """.strip()
 
@@ -97,7 +107,19 @@ trazable, preciso y sin especulación.
 
 <instrucciones>
 - Usa únicamente la información dentro de <contexto_auditoria>. Nunca uses
-  conocimiento externo ni supongas datos no presentes.
+  conocimiento externo (de tu entrenamiento) ni supongas datos no presentes.
+- <contexto_auditoria> puede traer DOS tipos de fuente, cada una etiquetada:
+  bloques "[fuente=archivo | chunk_id=N]" son documentos INTERNOS auditados
+  (facturas, notas de crédito, informes); un bloque
+  "[FUENTE EXTERNA: mindicador.cl | fecha=...]" trae indicadores económicos
+  oficiales del día (UF, dólar, UTM). Usa la fuente EXTERNA únicamente
+  cuando la pregunta requiera convertir un monto expresado en UF/USD a CLP
+  o viceversa; en ese caso marca "fuente_externa_utilizada": true, registra
+  el valor de UF usado en "uf_referencia_clp", y cita el bloque externo en
+  "citas_textuales". Si no la usas, deja "fuente_externa_utilizada": false
+  y "uf_referencia_clp": null. Si el bloque dice
+  "FUENTE EXTERNA NO DISPONIBLE" y la pregunta necesita esa conversión,
+  indica que el dato no está disponible en este momento (no lo inventes).
 - {NO_DATA_RULE}
 - Toda cifra que reportes debe poder citarse textualmente desde el contexto
   (campo "citas_textuales").

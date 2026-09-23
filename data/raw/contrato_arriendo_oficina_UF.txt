@@ -1,0 +1,17 @@
+CONTRATO DE ARRIENDO DE OFICINA CORPORATIVA
+Folio interno: CA-078
+Fecha de suscripción: 2025-03-01
+Arrendador: Inversiones Patio Sur SpA
+RUT Arrendador: 78.456.123-9
+Arrendatario: Banco Andino S.A.
+RUT Arrendatario: 90.111.222-3
+
+Detalle:
+Inmueble: Oficina corporativa, Torre Andina, piso 12, comuna de Las Condes.
+Canon de arriendo mensual: 45 UF
+Reajuste: según variación de la UF, sin cláusulas adicionales.
+Vigencia: 36 meses desde la fecha de suscripción.
+
+Observaciones: Contrato vigente, sin observaciones de auditoría previas.
+El monto en UF debe convertirse a pesos chilenos (CLP) usando el valor de
+la UF del día de la consulta para fines de reporte financiero.

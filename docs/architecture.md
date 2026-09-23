@@ -13,9 +13,13 @@ flowchart TD
         EMB --> IDX[("Índice FAISS\nvectorstore/")]
     end
 
+    EXT[("Fuente EXTERNA\nmindicador.cl\nUF / dólar / UTM del día")]
+
     subgraph Consulta["Consulta online (src/rag_pipeline.py)"]
-        R["Retriever FAISS\n(top-k=8)"] --> J["LLM-as-a-Judge\n(filtra chunks < score 6/10)"]
-        J --> CTX["Contexto citable\n<contexto_auditoria>"]
+        R["Retriever FAISS\n(top-k=8, fuente INTERNA)"] --> J["LLM-as-a-Judge\n(filtra chunks < score 6/10)"]
+        EXT --> MERGE["merge_context()\netiqueta INTERNA vs EXTERNA"]
+        J --> MERGE
+        MERGE --> CTX["Contexto citable\n<contexto_auditoria>"]
         CTX --> P["ChatPromptTemplate\n(rol Auditor Senior +\nfew-shot + CoT +\nguardrails XML)"]
         P --> LLM["Groq: openai/gpt-oss-120b\n(temperature=0.0)"]
         LLM --> OUT["Parser Pydantic estricto\nInformeAuditoria"]
@@ -38,10 +42,11 @@ flowchart TD
 
 | Componente | Módulo | Responsabilidad |
 |---|---|---|
-| Ingesta y chunking | `src/loaders.py` | Carga PDF/TXT, fragmenta sin cortar tablas financieras, adjunta metadatos de trazabilidad, construye/persiste FAISS. |
+| Ingesta y chunking (fuente INTERNA) | `src/loaders.py` | Carga PDF/TXT, fragmenta sin cortar tablas financieras, adjunta metadatos de trazabilidad, construye/persiste FAISS. |
+| Fuente EXTERNA | `src/external_data.py` | Consulta la API pública `mindicador.cl` (UF, dólar, UTM del día); degrada con gracia si falla (timeout, caída, respuesta malformada) sin tumbar el pipeline. |
 | Configuración y proveedores | `src/config.py` | Único punto de conexión a LLM (Groq por defecto; Google AI Studio/Gemini y GitHub Models disponibles como alternativa) y a embeddings (local vía sentence-transformers por defecto; Google/GitHub como alternativa), parámetros centrales. |
-| Prompts | `src/prompts.py` | Rol experto, few-shot con delimitadores, Chain-of-Thought explícito, guardrails XML anti-alucinación. |
-| Orquestación RAG | `src/rag_pipeline.py` | Ensambla `retriever \| LLM-judge \| prompt \| model \| parser` vía LCEL; expone `AuditRagPipeline`. |
+| Prompts | `src/prompts.py` | Rol experto, few-shot con delimitadores, Chain-of-Thought explícito, guardrails XML anti-alucinación, instrucciones de cuándo usar la fuente externa. |
+| Orquestación RAG | `src/rag_pipeline.py` | Ensambla `retriever \| LLM-judge \| merge_context (interna+externa) \| prompt \| model \| parser` vía LCEL; expone `AuditRagPipeline`. |
 | Verificación fáctica | `src/fact_checking.py` | Segunda cadena LLM que clasifica cada afirmación de la respuesta contra el contexto. |
 | Observabilidad y métricas | `src/metrics.py` | `AuditCallbackHandler` (latencia/tokens/costo) + las 4 métricas RAG deterministas + esquemas Pydantic. |
 
@@ -51,3 +56,4 @@ flowchart TD
 - **Salida Pydantic estricta**: permite validar programáticamente cada respuesta (tipos, campos obligatorios) antes de que llegue a un sistema downstream de cumplimiento.
 - **Fact-checking como cadena separada**: reduce el riesgo de que el mismo sesgo de la generación contamine su propia verificación.
 - **`temperature=0.0`**: en un dominio donde un monto o RUT mal citado tiene implicancias regulatorias, se prioriza determinismo sobre creatividad.
+- **Fuente externa etiquetada y degradable (`mindicador.cl`)**: se eligió una API pública real (no un mock permanente) para que el requisito de "fuente interna + externa" sea verificable en producción, no solo en un diagrama. Se etiqueta explícitamente en el contexto (`[FUENTE EXTERNA: ...]` vs `[fuente=archivo | chunk_id=N]`) para mantener la trazabilidad de cada dato, y se diseñó para degradar con gracia: una API externa no crítica nunca debe tumbar una consulta de auditoría (ver `docs/evidencia_pruebas.md` para un caso real de esta falla y recuperación).

@@ -30,7 +30,8 @@ python-dotenv>=1.0.0
 # --- Carga de documentos ------------------------------------------------- #
 pypdf>=4.0.0
 
-# --- Cliente HTTP (usado en tests/scripts de diagnóstico de proveedores) -- #
+# --- Cliente HTTP (fuente EXTERNA mindicador.cl en src/external_data.py, -- #
+# --- además usado en scripts de diagnóstico de proveedores) ---------------- #
 requests>=2.31.0
 
 # --- Tests ------------------------------------------------------------------ #

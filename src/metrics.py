@@ -55,6 +55,21 @@ class InformeAuditoria(BaseModel):
         default_factory=list,
         description="Fragmentos textuales exactos del contexto que respaldan la respuesta.",
     )
+    fuente_externa_utilizada: bool = Field(
+        default=False,
+        description=(
+            "True si la respuesta usó datos de la fuente EXTERNA (mindicador.cl) "
+            "para algún cálculo o conversión (p.ej. UF<->CLP, tipo de cambio). "
+            "Distingue trazabilidad interna (documentos auditados) de externa."
+        ),
+    )
+    uf_referencia_clp: float | None = Field(
+        default=None,
+        description=(
+            "Valor de la UF en CLP usado como referencia si la respuesta involucró "
+            "una conversión UF<->CLP, tomado de la fuente externa del día."
+        ),
+    )
 
 
 class ClaimVerification(BaseModel):
