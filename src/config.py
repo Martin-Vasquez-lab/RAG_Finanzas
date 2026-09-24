@@ -58,6 +58,7 @@ FAISS_INDEX_NAME: str = "auditoria_faiss_index"
 # `get_chat_model()` / `get_embeddings()`.
 LLMProvider = Literal["groq", "google", "github"]
 EmbeddingProvider = Literal["local", "google", "github"]
+MemoryStrategy = Literal["buffer", "summary"]
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,15 @@ class Settings:
     retriever_k: int = field(default_factory=lambda: int(os.getenv("RETRIEVER_K", "8")))
     judge_min_score: float = field(
         default_factory=lambda: float(os.getenv("JUDGE_MIN_SCORE", "6.0"))
+    )
+
+    # --- Memoria conversacional (IE4) ---------------------------------------- #
+    # "buffer" (default): historial completo, sin costo de LLM extra, sin
+    # riesgo de pérdida de precisión. "summary": resumen progresivo, más
+    # compacto pero con una llamada extra al LLM por turno. Comparación
+    # empírica de ambas en docs/comparacion_memoria.md.
+    memory_strategy: MemoryStrategy = field(
+        default_factory=lambda: os.getenv("MEMORY_STRATEGY", "buffer").lower()  # type: ignore[return-value]
     )
 
     def validate_chat(self) -> None:

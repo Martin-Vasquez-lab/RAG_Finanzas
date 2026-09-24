@@ -20,6 +20,22 @@ mismo bloque `<contexto_auditoria>`, pero con su propia etiqueta
 ("[FUENTE EXTERNA: mindicador.cl | ...]") para que quede claro cuál dato
 viene de los documentos auditados y cuál de un servicio externo — requisito
 IL1.2/IE3 de "combinar fuentes de datos internas y externas".
+
+Memoria conversacional (IE4, `src/memory.py`): `AuditRagPipeline.run()`
+acepta un `session_id` opcional. Sin `session_id` (default), cada llamada
+es stateless, igual que antes. Con `session_id`, se mantiene una instancia
+de memoria (buffer o resumen, según `MEMORY_STRATEGY`) por sesión, EN
+MEMORIA DEL PROCESO (sin persistencia en disco). El historial se inyecta
+como texto ANTES de la pregunta actual (patrón simplificado de
+"history-aware retrieval" sin una llamada extra de reformulación):
+  - Para el RETRIEVER (embeddings) se usa la pregunta CRUDA, sin historial,
+    para no diluir el vector de búsqueda con texto de turnos anteriores.
+  - Para el JUEZ y el GENERADOR (ambos basados en LLM, no en embeddings) se
+    usa la pregunta "contextualizada" (historial + pregunta de seguimiento),
+    para que puedan resolver referencias ambiguas ("esa misma factura").
+El guardrail anti-alucinación se preserva explícitamente: el prompt indica
+que el historial SOLO sirve para interpretar la referencia, nunca como
+fuente del dato reportado (ver `src/prompts.py`).
 """
 
 from __future__ import annotations
@@ -38,10 +54,30 @@ from src.external_data import (
     format_external_context,
 )
 from src.loaders import load_faiss_index
+from src.memory import ConversationMemory, create_memory
 from src.metrics import AuditCallbackHandler, InformeAuditoria
 from src.prompts import AUDIT_PROMPT_TEMPLATE, JUDGE_PROMPT_TEMPLATE
 
 _parser = PydanticOutputParser(pydantic_object=InformeAuditoria)
+
+
+def _render_answer_for_memory(informe: InformeAuditoria) -> str:
+    """Convierte un `InformeAuditoria` a una oración breve para guardar en
+    memoria conversacional: más legible y compacta que el JSON crudo, tanto
+    para `BufferMemory` (se muestra tal cual en el historial) como para el
+    prompt de actualización de `SummaryMemory`.
+    """
+    partes: list[str] = []
+    if informe.monto_total is not None:
+        partes.append(f"monto_total={informe.monto_total} {informe.divisa or ''}".strip())
+    if informe.rut_emisor:
+        partes.append(f"rut_emisor={informe.rut_emisor}")
+    partes.append(f"nivel_riesgo_fraude={informe.nivel_riesgo_fraude}")
+    if informe.alertas_detectadas:
+        partes.append(f"alertas={'; '.join(informe.alertas_detectadas)}")
+    if informe.fuente_externa_utilizada:
+        partes.append(f"uf_referencia_clp={informe.uf_referencia_clp}")
+    return "; ".join(partes) if partes else "Sin datos relevantes en el contexto."
 
 
 def format_docs(docs: list[Document]) -> str:
@@ -86,6 +122,8 @@ class RagRunResult:
     context_text: str
     callback: AuditCallbackHandler
     external_data_available: bool
+    session_id: str | None
+    history_turns_used: int
 
 
 class AuditRagPipeline:
@@ -101,7 +139,12 @@ class AuditRagPipeline:
     `build_rag_chain()` para la variante plana sin juez.
     """
 
-    def __init__(self, k: int | None = None, judge_min_score: float | None = None) -> None:
+    def __init__(
+        self,
+        k: int | None = None,
+        judge_min_score: float | None = None,
+        memory_strategy: str | None = None,
+    ) -> None:
         self.vectorstore = load_faiss_index()
         self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": k or settings.retriever_k})
         self.llm = get_chat_model()
@@ -117,12 +160,28 @@ class AuditRagPipeline:
         # de golpear mindicador.cl en cada pregunta. `None` = aún no
         # consultado; se resuelve de forma perezosa en el primer `run()`.
         self._external_cache: IndicadoresExternos | None = None
+        # Memoria conversacional (IE4): permite forzar una estrategia
+        # (p.ej. para el benchmark comparativo buffer vs summary) sin tocar
+        # MEMORY_STRATEGY en .env. Una instancia de memoria por session_id,
+        # solo en memoria del proceso (ver src/memory.py).
+        self.memory_strategy = memory_strategy
+        self._sessions: dict[str, ConversationMemory] = {}
 
     def _get_external_context(self) -> tuple[str, bool]:
         """Consulta (con caché) la fuente externa y retorna su bloque de contexto."""
         if self._external_cache is None:
             self._external_cache = fetch_indicadores_economicos()
         return format_external_context(self._external_cache), self._external_cache.disponible
+
+    def _get_or_create_memory(self, session_id: str) -> ConversationMemory:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = create_memory(self.memory_strategy)
+        return self._sessions[session_id]
+
+    def reset_session(self, session_id: str) -> None:
+        """Descarta la memoria de una sesión (útil en tests/benchmarks para
+        comparar estrategias desde cero sin instanciar un pipeline nuevo)."""
+        self._sessions.pop(session_id, None)
 
     def _judge_filter(self, question: str, docs: list[Document], config: dict) -> list[Document]:
         """Filtra chunks recuperados usando el LLM como juez de relevancia (0-10)."""
@@ -134,14 +193,27 @@ class AuditRagPipeline:
                 kept.append(doc)
         return kept
 
-    def run(self, question: str) -> RagRunResult:
+    def run(self, question: str, session_id: str | None = None) -> RagRunResult:
         callback = AuditCallbackHandler(model_name=self._model_name())
         config = {"callbacks": [callback]}
+
+        memory = self._get_or_create_memory(session_id) if session_id else None
+        history_context = memory.get_context_for_prompt() if memory else ""
+        history_turns_used = memory.turn_count() if memory else 0
+
+        # Pregunta "contextualizada": historial (si hay) + pregunta actual.
+        # Se usa para el JUEZ y el GENERADOR (LLM, resiste texto extra sin
+        # degradarse), pero NO para el retriever (embeddings: el historial
+        # diluiría el vector de búsqueda) — ver docstring del módulo.
+        if history_context:
+            contextualized_question = f"{history_context}\n\nPregunta de seguimiento: {question}"
+        else:
+            contextualized_question = question
 
         retrieved_docs = self.retriever.invoke(question, config=config)
         retrieved_ids = [d.metadata.get("chunk_id") for d in retrieved_docs]
 
-        kept_docs = self._judge_filter(question, retrieved_docs, config)
+        kept_docs = self._judge_filter(contextualized_question, retrieved_docs, config)
         if not kept_docs:
             # Si el juez descarta todo, se preserva el top-k original para no
             # dejar al generador sin contexto: es preferible que responda
@@ -153,7 +225,15 @@ class AuditRagPipeline:
         external_context, external_available = self._get_external_context()
         context_text = merge_context(internal_context, external_context)
 
-        informe = self.answer_chain.invoke({"context": context_text, "question": question}, config=config)
+        informe = self.answer_chain.invoke(
+            {"context": context_text, "question": contextualized_question}, config=config
+        )
+
+        if memory is not None:
+            # La llamada extra de SummaryMemory (si aplica) se registra bajo
+            # el MISMO callback de este turno, para que el consumo de la
+            # sesión quede completo en `callback.summary()`.
+            memory.add_turn(question, _render_answer_for_memory(informe), config=config)
 
         return RagRunResult(
             informe=informe,
@@ -162,6 +242,8 @@ class AuditRagPipeline:
             context_text=context_text,
             callback=callback,
             external_data_available=external_available,
+            session_id=session_id,
+            history_turns_used=history_turns_used,
         )
 
     def _model_name(self) -> str:
@@ -171,8 +253,9 @@ class AuditRagPipeline:
 def build_rag_chain():
     """Variante LCEL plana: `retriever | prompt | model | parser`, sin el
     filtro LLM-judge, expuesta por completitud respecto del patrón canónico
-    enseñado en el curso. Para el flujo completo con juez y métricas, usar
-    `AuditRagPipeline`.
+    enseñado en el curso. Para el flujo completo con juez, métricas y
+    memoria conversacional, usar `AuditRagPipeline` (esta variante NO
+    soporta memoria).
 
     También combina fuente interna (FAISS) + externa (mindicador.cl), igual
     que `AuditRagPipeline`, para que ambas variantes sean consistentes.

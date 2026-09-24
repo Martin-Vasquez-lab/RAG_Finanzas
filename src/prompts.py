@@ -78,6 +78,23 @@ Output:
 ```json
 {"monto_total": 1170003.6, "divisa": "CLP", "rut_emisor": null, "nivel_riesgo_fraude": "bajo", "alertas_detectadas": [], "citas_textuales": ["Factura F-2100 | Monto: 30 UF", "Unidad de fomento (UF) (uf): 39000.12 Pesos"], "fuente_externa_utilizada": true, "uf_referencia_clp": 39000.12}
 ```
+
+Ejemplo 6 (pregunta de seguimiento con [HISTORIAL_CONVERSACION]: el historial
+SOLO sirve para resolver la referencia "esa misma factura"; el dato
+reportado sigue viniendo EXCLUSIVAMENTE de <contexto_auditoria>, nunca de
+lo que dice el historial por sí solo)
+Input:
+  "[HISTORIAL_CONVERSACION - buffer completo]
+  Turno 1 - Pregunta: ¿Cuál es el monto total y el RUT del emisor en la factura F-1023?
+  Turno 1 - Respuesta: monto_total=1245000 CLP; rut_emisor=76.123.456-7; nivel_riesgo_fraude=bajo
+  [/HISTORIAL_CONVERSACION]
+
+  Pregunta de seguimiento: ¿Y cuál era la fecha de emisión de esa misma factura?"
+Contexto disponible: "[fuente=factura_F1023.txt | chunk_id=0]\nFactura F-1023 | Fecha de emisión: 2025-04-12 | RUT Emisor: 76.123.456-7 | Monto total: $1.245.000 CLP"
+Output:
+```json
+{"monto_total": 1245000, "divisa": "CLP", "rut_emisor": "76.123.456-7", "nivel_riesgo_fraude": "bajo", "alertas_detectadas": [], "citas_textuales": ["Fecha de emisión: 2025-04-12"], "fuente_externa_utilizada": false, "uf_referencia_clp": null}
+```
 """.strip()
 
 # --------------------------------------------------------------------------- #
@@ -86,6 +103,12 @@ Output:
 CHAIN_OF_THOUGHT_INSTRUCTIONS: str = """
 Antes de responder, piensa paso a paso EN SILENCIO (no incluyas este
 razonamiento en tu respuesta final, solo el resultado estructurado):
+  0) Si el mensaje incluye un bloque [HISTORIAL_CONVERSACION], úsalo
+     ÚNICAMENTE para entender a qué se refiere la pregunta de seguimiento
+     (p.ej. qué documento, RUT o monto previo menciona "esa misma
+     factura"/"ese mismo RUT"). El historial NO es una fuente de datos
+     válida por sí sola: cada cifra que reportes debe seguir viniendo de
+     <contexto_auditoria>.
   1) Identifica todos los montos, RUT y fechas mencionados explícitamente
      en <contexto_auditoria>.
   2) Verifica la coherencia interna de esos datos (sumas, duplicados,
@@ -120,6 +143,13 @@ trazable, preciso y sin especulación.
   y "uf_referencia_clp": null. Si el bloque dice
   "FUENTE EXTERNA NO DISPONIBLE" y la pregunta necesita esa conversión,
   indica que el dato no está disponible en este momento (no lo inventes).
+- El mensaje del área de auditoría puede incluir, ANTES de la pregunta
+  actual, un bloque "[HISTORIAL_CONVERSACION]" con turnos previos de la
+  misma sesión (historial completo o un resumen, según la estrategia de
+  memoria activa). Ese historial es SOLO para interpretar referencias
+  ambiguas de la pregunta de seguimiento ("esa misma factura", "ese mismo
+  RUT"); NUNCA lo uses como fuente del dato reportado — todo dato sigue
+  debiendo venir de <contexto_auditoria>, igual que si no hubiera memoria.
 - {NO_DATA_RULE}
 - Toda cifra que reportes debe poder citarse textualmente desde el contexto
   (campo "citas_textuales").
@@ -164,10 +194,16 @@ AUDIT_PROMPT_TEMPLATE: ChatPromptTemplate = ChatPromptTemplate.from_messages(
 # --------------------------------------------------------------------------- #
 JUDGE_SYSTEM_PROMPT: str = """
 Eres un filtro de relevancia para un sistema RAG de auditoría financiera.
-Recibirás una pregunta y UN fragmento recuperado. Califica de 0 a 10 qué tan
-útil es ese fragmento para responder la pregunta con datos verificables
-(montos, RUT, fechas, hallazgos de riesgo). Responde SOLO con un número
-entero de 0 a 10, sin texto adicional.
+Recibirás una pregunta y UN fragmento recuperado. La "pregunta" puede
+incluir, antes de la pregunta de seguimiento actual, un bloque
+[HISTORIAL_CONVERSACION] con turnos previos de la misma sesión: úsalo para
+interpretar a qué se refiere una pregunta de seguimiento ambigua (p.ej.
+"esa misma factura"), pero evalúa la relevancia del fragmento respecto de
+la ÚLTIMA pregunta (la que sigue a "Pregunta de seguimiento:" o, si no hay
+historial, la pregunta completa). Califica de 0 a 10 qué tan útil es ese
+fragmento para responder con datos verificables (montos, RUT, fechas,
+hallazgos de riesgo). Responde SOLO con un número entero de 0 a 10, sin
+texto adicional.
 """.strip()
 
 JUDGE_PROMPT_TEMPLATE: ChatPromptTemplate = ChatPromptTemplate.from_messages(

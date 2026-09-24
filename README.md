@@ -25,6 +25,11 @@ resultados, balances trimestrales e informes de riesgo.
   degrada con gracia y sigue respondiendo solo con la fuente interna — ver
   evidencia de un caso real de esto en
   [`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md).
+- **Preguntas de seguimiento sin perder precisión** (`src/memory.py`): el
+  pipeline mantiene memoria conversacional por sesión (`session_id`), para
+  resolver referencias como "esa misma factura" sin que el guardrail
+  anti-alucinación se relaje — ver
+  [Memoria conversacional](#memoria-conversacional-ie4) más abajo.
 
 Ver [`docs/architecture.md`](docs/architecture.md) para el diagrama de
 arquitectura completo y la justificación de decisiones.
@@ -45,16 +50,19 @@ src/
   config.py                    # Conexión a LLM (Groq / Google / GitHub) y embeddings (local / Google / GitHub)
   loaders.py                    # Ingesta, chunking, construcción del índice FAISS (fuente INTERNA)
   external_data.py               # Fuente EXTERNA: API mindicador.cl (UF/dólar/UTM), degrada con gracia
-  prompts.py                      # Plantillas: rol experto, few-shot, CoT, guardrails XML
-  rag_pipeline.py                  # Ensamblado LCEL: retriever | judge | fuente externa | prompt | LLM | parser
-  metrics.py                        # Callback de costo/latencia + 4 métricas RAG + esquemas Pydantic
-  fact_checking.py                   # Cadena secundaria de verificación fáctica
+  memory.py                       # Memoria conversacional (IE4): BufferMemory / SummaryMemory
+  prompts.py                       # Plantillas: rol experto, few-shot, CoT, guardrails XML
+  rag_pipeline.py                   # Ensamblado LCEL: retriever | judge | fuente externa | memoria | prompt | LLM | parser
+  metrics.py                         # Callback de costo/latencia + 4 métricas RAG + esquemas Pydantic
+  fact_checking.py                    # Cadena secundaria de verificación fáctica
 tests/
-  test_*.py                           # Suite automática determinista (pytest, sin costo de API)
-  manual_benchmark_groq.py             # Benchmark MANUAL contra Groq real (evidencia de pruebas)
+  test_*.py                            # Suite automática determinista (pytest, sin costo de API)
+  manual_benchmark_groq.py              # Benchmark MANUAL contra Groq real (evidencia de pruebas)
+  manual_benchmark_memoria.py            # Benchmark MANUAL comparativo buffer vs summary
 docs/
-  architecture.md / .mmd               # Diagrama de arquitectura (Mermaid) y justificación de decisiones
-  evidencia_pruebas.md                  # Evidencia de la última corrida real (consumo de API, casos destacados)
+  architecture.md / .mmd                 # Diagrama de arquitectura (Mermaid) y justificación de decisiones
+  evidencia_pruebas.md                    # Evidencia de la última corrida real (consumo de API, casos destacados)
+  comparacion_memoria.md                   # Comparación empírica BufferMemory vs SummaryMemory (IE4/IE8)
 ```
 
 ## Instalación
@@ -91,6 +99,7 @@ cp .env.example .env
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | No (default `1200`/`200`) | Ver justificación en `src/loaders.py`. |
 | `RETRIEVER_K` | No (default `8`) | Top-k de chunks recuperados antes del filtro LLM-judge. |
 | `JUDGE_MIN_SCORE` | No (default `6.0`) | Umbral (0-10) para que un chunk pase el filtro del juez. |
+| `MEMORY_STRATEGY` | No (default `buffer`) | `buffer` o `summary` — estrategia de memoria conversacional, ver [Memoria conversacional](#memoria-conversacional-ie4). |
 
 **Nunca subas tu `.env` real al repositorio** (`.gitignore` ya lo excluye).
 
@@ -244,6 +253,48 @@ compatibles para facilitar una futura migración:
 - **Answer Relevancy**: proxy léxico (similitud coseno TF) entre pregunta y
   respuesta — ver nota de diseño en `src/metrics.py` sobre cómo reemplazarlo
   por una implementación basada en embeddings reales.
+
+## Memoria conversacional (IE4)
+
+El pipeline soporta preguntas de seguimiento dentro de una misma sesión
+(`session_id`), p.ej. "¿Cuál es el RUT de F-1023?" seguido de "¿Y cuál era
+el RUT de esa misma factura otra vez?". `src/memory.py` implementa dos
+estrategias intercambiables vía `MEMORY_STRATEGY`:
+
+- **`buffer`** (default): guarda cada turno (pregunta + respuesta) tal
+  cual. Sin llamadas LLM extra, sin pérdida de precisión, pero el contexto
+  crece con la conversación.
+- **`summary`**: mantiene un resumen progresivo, actualizado con una
+  llamada extra al LLM (Groq) por turno. Contexto casi constante en
+  tamaño, con el riesgo de que el resumen pierda precisión de cifras
+  exactas al comprimir.
+
+El historial se inyecta como texto ANTES de la pregunta actual — al JUEZ y
+al GENERADOR (ambos basados en LLM), pero **no** al retriever (para no
+diluir el embedding de búsqueda) — sin una llamada extra de reformulación
+de pregunta ("history-aware retriever"), por ser más simple y confiable
+dado que ya existen guardrails anti-alucinación estrictos. El prompt deja
+explícito que el historial solo sirve para resolver referencias
+ambiguas, nunca como fuente del dato reportado (ver `src/prompts.py`).
+
+```python
+from src.rag_pipeline import AuditRagPipeline
+
+pipeline = AuditRagPipeline()  # usa MEMORY_STRATEGY de .env
+pipeline.run("¿Cuál es el RUT del emisor en la factura F-1023?", session_id="sesion-1")
+pipeline.run("¿Y cuál era el RUT de esa misma factura otra vez?", session_id="sesion-1")
+```
+
+**Comparación empírica (buffer vs summary)**, corrida real contra Groq de
+la misma conversación de 5 turnos con una pregunta de seguimiento: ambas
+estrategias respondieron el dato de seguimiento correctamente (sin
+degradación observada), pero `summary` costó **16,2% más** ($0,010206 USD
+vs $0,008783 USD) y usó **5 llamadas extra** a la API — la llamada
+adicional de actualización del resumen superó, a esta escala, el ahorro de
+tokens de comprimir el historial. Ver
+[`docs/comparacion_memoria.md`](docs/comparacion_memoria.md) para la tabla
+completa, el detalle por turno y la conclusión (llena el requisito de
+"pruebas comparativas de hiperparámetros" de IE8).
 
 ## Uso de Inteligencia Artificial en este proyecto
 
