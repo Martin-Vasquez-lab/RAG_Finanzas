@@ -31,8 +31,12 @@ resultados, balances trimestrales e informes de riesgo.
   anti-alucinación se relaje — ver
   [Memoria conversacional](#memoria-conversacional-ie4) más abajo.
 
-Ver [`docs/architecture.md`](docs/architecture.md) para el diagrama de
-arquitectura completo y la justificación de decisiones.
+Ver [`docs/architecture.md`](docs/architecture.md) (con imagen renderizada
+en [`docs/architecture.png`](docs/architecture.png)) para el diagrama de
+arquitectura completo y la justificación de decisiones, y
+[`docs/caso_organizacional.md`](docs/caso_organizacional.md) para la
+descripción formal de la organización, objetivos medibles, datos y
+restricciones del caso.
 
 ## Estructura del repositorio
 
@@ -60,9 +64,11 @@ tests/
   manual_benchmark_groq.py              # Benchmark MANUAL contra Groq real (evidencia de pruebas)
   manual_benchmark_memoria.py            # Benchmark MANUAL comparativo buffer vs summary
 docs/
-  architecture.md / .mmd                 # Diagrama de arquitectura (Mermaid) y justificación de decisiones
-  evidencia_pruebas.md                    # Evidencia de la última corrida real (consumo de API, casos destacados)
-  comparacion_memoria.md                   # Comparación empírica BufferMemory vs SummaryMemory (IE4/IE8)
+  caso_organizacional.md                 # Organización, objetivos medibles, datos, restricciones (IE1)
+  architecture.md / .mmd / .png           # Diagrama de arquitectura (fuente Mermaid + imagen renderizada, IE7)
+  boceto_interfaz.svg / .png               # Boceto conceptual de la interfaz de consulta del auditor
+  evidencia_pruebas.md                      # Evidencia de la última corrida real (consumo de API, casos destacados)
+  comparacion_memoria.md                     # Comparación empírica BufferMemory vs SummaryMemory (IE4/IE8)
 ```
 
 ## Instalación

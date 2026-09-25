@@ -40,5 +40,10 @@ Thumbs.db
 # --- Configuración local de Claude Code (no es parte del proyecto) ----------- #
 .claude/
 
+# --- Entregables externos (Word/PDF vía AVA y correo, NO se versionan) ------- #
+docs/informe_tecnico_borrador.md
+docs/guion_video_presentacion.md
+*.docx
+
 # --- Jupyter ------------------------------------------------------------------- #
 .ipynb_checkpoints/

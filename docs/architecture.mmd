@@ -1,36 +1,27 @@
 flowchart TD
-    U[Usuario / Auditor] -->|Pregunta + session_id opcional| MEM
+    U[Usuario / Auditor] -->|"Pregunta + session_id opcional"| MEM[("Memoria de sesión\nsrc/memory.py — Buffer o Summary\nsession_id -> historial")]
 
     subgraph Ingesta["Ingesta offline (src/loaders.py)"]
-        RAW[("data/raw/\nfacturas, notas de crédito,\nestados de resultados, balances")] --> SPLIT["RecursiveCharacterTextSplitter\n(chunk_size=1200, overlap=200,\nseparadores anti-corte de tablas)"]
+        RAW[("data/raw/\nfacturas, notas de crédito,\ninformes de riesgo, contratos")] --> SPLIT["RecursiveCharacterTextSplitter\n(chunk_size=1200, overlap=200)"]
         SPLIT --> META["Metadatos por chunk:\nsource, page, fecha_ingesta,\ntipo_documento, chunk_id"]
-        META --> EMB["Embeddings locales\nsentence-transformers\n(CPU, sin API)"]
+        META --> EMB["Embeddings locales\nsentence-transformers (CPU)"]
         EMB --> IDX[("Índice FAISS\nvectorstore/")]
     end
 
     EXT[("Fuente EXTERNA\nmindicador.cl\nUF / dólar / UTM del día")]
 
-    subgraph Memoria["Memoria conversacional (src/memory.py, IE4)"]
-        MEM[("Sesiones en memoria\ndel proceso\nsession_id -> memoria")]
-        MEM -->|"sin historial previo"| RAWQ["Pregunta CRUDA\n(sin historial)"]
-        MEM -->|"con historial"| QCTX["Pregunta contextualizada\nHISTORIAL + pregunta de seguimiento"]
-    end
-
     subgraph Consulta["Consulta online (src/rag_pipeline.py)"]
-        RAWQ --> R["Retriever FAISS\n(top-k=8, fuente INTERNA)"]
+        MEM -->|"pregunta CRUDA\n(sin diluir embeddings)"| R["Retriever FAISS\n(top-k=8, fuente INTERNA)"]
+        IDX --> R
         R --> J["LLM-as-a-Judge\n(filtra chunks < score 6/10)"]
-        QCTX -.->|"pregunta contextualizada\n(no diluye embeddings)"| J
+        MEM -.->|"+ historial, si existe\n(contextualiza relevancia)"| J
         EXT --> MERGE["merge_context()\netiqueta INTERNA vs EXTERNA"]
-        J --> MERGE
-        MERGE --> CTX["Contexto citable\n<contexto_auditoria>"]
-        CTX --> P["ChatPromptTemplate\n(rol Auditor Senior +\nfew-shot + CoT +\nguardrails XML)"]
-        QCTX -.-> P
+        J --> MERGE --> CTX["Contexto citable\n<contexto_auditoria>"]
+        CTX --> P["ChatPromptTemplate\n(rol Auditor Senior +\nfew-shot + CoT + guardrails XML)"]
+        MEM -.->|"+ historial, si existe\n(resuelve 'esa misma factura')"| P
         P --> LLM["Groq: openai/gpt-oss-120b\n(temperature=0.0)"]
         LLM --> OUT["Parser Pydantic estricto\nInformeAuditoria"]
     end
-
-    OUT --> MEMUPD["memory.add_turn()\nBuffer: guarda turno tal cual\nSummary: +1 llamada LLM de resumen"]
-    MEMUPD --> MEM
 
     subgraph Verificacion["Verificación (src/fact_checking.py + src/metrics.py)"]
         OUT --> FC["Cadena de Fact-Checking\n[Soportado]/[Contradictorio]/[No Mencionado]"]
@@ -38,7 +29,8 @@ flowchart TD
         LLM --> CB["AuditCallbackHandler\nlatencia, tokens, costo estimado"]
     end
 
-    IDX --> R
+    OUT --> MEMUPD["memory.add_turn()\nguarda el turno para la\nPRÓXIMA pregunta de la sesión"]
+
     OUT --> RESP[Respuesta estructurada + trazabilidad]
     MET --> RESP
     CB --> RESP
