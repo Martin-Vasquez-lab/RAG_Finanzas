@@ -1,4 +1,4 @@
-# RAG_Finanzas — Agente RAG de Auditoría Financiera (EP1 - ISY0101)
+# RAG_Finanzas — Agente RAG de Auditoría Financiera (EP1 + EP2 - ISY0101)
 
 Proyecto académico de la Evaluación Parcial N°1 de **Ingeniería de Soluciones
 con IA (ISY0101)**: un agente basado en LLM + RAG para apoyar al Departamento
@@ -38,6 +38,12 @@ arquitectura completo y la justificación de decisiones, y
 descripción formal de la organización, objetivos medibles, datos y
 restricciones del caso.
 
+> **EP2**: sobre este pipeline RAG se construyó un **agente funcional**
+> (`src/agent/`) que decide por sí mismo qué herramienta usar y en qué
+> orden, con planificación priorizada, replanificación y memoria de largo
+> plazo entre sesiones. Ver la sección
+> [Agente funcional (EP2)](#agente-funcional-ep2) más abajo.
+
 ## Estructura del repositorio
 
 ```
@@ -54,20 +60,31 @@ src/
   config.py                    # Conexión a LLM (Groq / Google / GitHub) y embeddings (local / Google / GitHub)
   loaders.py                    # Ingesta, chunking, construcción del índice FAISS (fuente INTERNA)
   external_data.py               # Fuente EXTERNA: API mindicador.cl (UF/dólar/UTM), degrada con gracia
-  memory.py                       # Memoria conversacional (IE4): BufferMemory / SummaryMemory
-  prompts.py                       # Plantillas: rol experto, few-shot, CoT, guardrails XML
-  rag_pipeline.py                   # Ensamblado LCEL: retriever | judge | fuente externa | memoria | prompt | LLM | parser
+  memory.py                       # Memoria conversacional de sesión (IE4): BufferMemory / SummaryMemory
+  prompts.py                       # Plantillas EP1: rol experto, few-shot, CoT, guardrails XML
+  rag_pipeline.py                   # Ensamblado LCEL (EP1): retriever | judge | fuente externa | memoria | prompt | LLM | parser
   metrics.py                         # Callback de costo/latencia + 4 métricas RAG + esquemas Pydantic
-  fact_checking.py                    # Cadena secundaria de verificación fáctica
+  fact_checking.py                    # Cadena secundaria de verificación fáctica (EP1)
+  agent/                                # Agente funcional (EP2) — ver sección "Agente funcional (EP2)"
+    chunk_store.py                       # Almacén de chunks por ejecución (evita retipear texto por IDs)
+    informe_store.py                      # Almacén de InformeAuditoria por ejecución (idem, vía informe_id)
+    case_store.py                          # CaseLog (JSONL, dedup) + FindingsIndex (FAISS, memoria de largo plazo)
+    approval.py                             # Aprobación de hallazgos pendientes (NO es una herramienta del LLM)
+    plan.py                                  # PlanAuditoria/PasoPlan: plan priorizado (Pydantic)
+    llm_utils.py                              # Reintento acotado ante respuesta vacía del LLM
+    tools.py                                   # Las 7 herramientas atómicas + AgentDependencies
+    graph.py                                    # Grafo LangGraph: planner/llm/tools/replanner
 tests/
   test_*.py                            # Suite automática determinista (pytest, sin costo de API)
-  manual_benchmark_groq.py              # Benchmark MANUAL contra Groq real (evidencia de pruebas)
-  manual_benchmark_memoria.py            # Benchmark MANUAL comparativo buffer vs summary
+  test_agent_*.py                       # Suite determinista del agente EP2 (herramientas, grafo, plan, memoria)
+  test_agent_*_live.py                   # Pruebas EP2 contra Groq real (marcador `live`, ver más abajo)
+  manual_benchmark_groq.py              # Benchmark MANUAL contra Groq real (evidencia de pruebas, EP1)
+  manual_benchmark_memoria.py            # Benchmark MANUAL comparativo buffer vs summary (EP1)
 docs/
   caso_organizacional.md                 # Organización, objetivos medibles, datos, restricciones (IE1)
-  architecture.md / .mmd / .png           # Diagrama de arquitectura (fuente Mermaid + imagen renderizada, IE7)
+  architecture.md / .mmd / .png           # Diagrama de arquitectura EP1 (fuente Mermaid + imagen renderizada, IE7)
   boceto_interfaz.svg / .png               # Boceto conceptual de la interfaz de consulta del auditor
-  evidencia_pruebas.md                      # Evidencia de la última corrida real (consumo de API, casos destacados)
+  evidencia_pruebas.md                      # Evidencia de corridas reales: EP1 y, en progreso, los escenarios EP2
   comparacion_memoria.md                     # Comparación empírica BufferMemory vs SummaryMemory (IE4/IE8)
 ```
 
@@ -301,6 +318,133 @@ tokens de comprimir el historial. Ver
 [`docs/comparacion_memoria.md`](docs/comparacion_memoria.md) para la tabla
 completa, el detalle por turno y la conclusión (llena el requisito de
 "pruebas comparativas de hiperparámetros" de IE8).
+
+## Agente funcional (EP2)
+
+Sobre el pipeline RAG de la EP1 (que sigue intacto y funcionando igual,
+`src/rag_pipeline.py` no se modificó) se construyó un **agente funcional**
+en `src/agent/` que integra las mismas capacidades (consulta a los
+documentos internos, fuente externa, generación del informe, verificación
+fáctica) como **herramientas atómicas**, y es el **LLM quien decide**, en
+cada paso, cuál usar y en qué orden — no una cadena con pasos fijos como en
+la EP1.
+
+### Arquitectura: el grafo decide, no está cableado
+
+```mermaid
+graph TD
+    START((START)) -->|primera pregunta de la sesión| PLANNER[planner]
+    START -->|pregunta de seguimiento, la sesión ya tiene un plan| REPLANNER[replanner]
+    PLANNER --> LLM["llm (bind_tools, 7 herramientas)"]
+    LLM -->|"tool_calls Y iteration<8 Y tokens<20k"| TOOLS["tools (ejecuta; bloquea llamada idéntica consecutiva)"]
+    LLM -->|"sin tool_calls, o tope alcanzado"| END((END))
+    TOOLS -->|"riesgo alto o fuente externa caída"| REPLANNER
+    TOOLS -->|caso normal| LLM
+    REPLANNER --> LLM
+```
+
+Implementado con **LangGraph** (`src/agent/graph.py`). El estado del grafo
+(`AgentState`) persiste entre turnos de una misma sesión vía un
+checkpointer (`MemorySaver`, en memoria del proceso); cada turno reinicia
+el tope de iteraciones/tokens y la guarda de repetición, pero conserva el
+historial de mensajes y el plan vigente.
+
+### Las 7 herramientas atómicas (`src/agent/tools.py`)
+
+| Herramienta | Tipo | Envuelve |
+|---|---|---|
+| `recuperar_documentos` | consulta | FAISS (fuente interna, EP1) |
+| `juzgar_relevancia` | razonamiento | LLM-as-judge (EP1) |
+| `consultar_tipo_cambio` | consulta externa | `mindicador.cl` (EP1) |
+| `generar_informe` | razonamiento | Prompt auditor + parser Pydantic (EP1); máximo una vez por pregunta, valida en código |
+| `verificar_afirmaciones` | razonamiento | Fact-checking (EP1); recibe un `informe_id`, nunca el JSON completo |
+| `buscar_hallazgos_previos` | consulta (memoria de largo plazo) | Índice FAISS de hallazgos **aprobados**, separado del de documentos |
+| `registrar_hallazgo` | **escritura** | Log de casos (JSONL, con deduplicación); único riesgo alto queda `pendiente_de_aprobación` |
+
+Los chunks y los informes generados **nunca viajan como texto por los
+argumentos del LLM**: viven en `ChunkStore`/`InformeStore` (por ejecución)
+y las herramientas se pasan IDs, no el contenido — evita que el modelo
+retipee (y potencialmente altere) una cita textual, y ahorra tokens.
+
+Ninguna herramienta lanza una excepción hacia el grafo: los errores (fuente
+externa caída, IDs inexistentes, respuesta vacía del LLM tras reintentos)
+se devuelven como observación (`{"error": "..."}`) para que el agente
+pueda razonar sobre ellos y decidir un siguiente paso.
+
+### Memoria: corto plazo vs. largo plazo
+
+- **Corto plazo** (de sesión): el historial de mensajes del propio grafo
+  (vía el checkpointer), no `src.memory` — eso sigue siendo exclusivo de
+  `AuditRagPipeline` (EP1), para no duplicar el historial en el prompt.
+- **Largo plazo** (`case_store.FindingsIndex`): un índice FAISS **separado**
+  del de documentos, que solo indexa hallazgos **aprobados**, persistido en
+  disco (`vectorstore_hallazgos/`, ignorado por git) y recargable tras un
+  reinicio del proceso. Se consulta explícitamente con
+  `buscar_hallazgos_previos`, y es lo que permite que una pregunta en una
+  sesión **nueva** (sin historial de corto plazo) recupere un hallazgo
+  registrado en una sesión anterior.
+- La aprobación de un hallazgo (`src/agent/approval.py`) es una función
+  separada, deliberadamente **fuera** de la lista de herramientas del LLM:
+  el agente nunca puede auto-aprobarse un hallazgo de riesgo alto.
+
+### Plan priorizado y replanificación (`src/agent/plan.py`)
+
+El agente genera un plan priorizado antes de actuar, inyectado como mensaje
+en la conversación (no solo en un campo interno) para que realmente pese en
+la siguiente decisión. Se replanifica -incrementando la versión del plan-
+ante 3 disparadores concretos, verificables en código:
+
+1. Un hallazgo de riesgo **alto** (`registrar_hallazgo` -> pendiente de
+   aprobación).
+2. Una fuente externa que deja de estar disponible a mitad de tarea
+   (`disponible=False`).
+3. Un mensaje de seguimiento del usuario en una sesión que **ya tenía** un
+   plan (no es la primera pregunta de esa sesión).
+
+### Instalación y variables de entorno
+
+Las mismas que la EP1 (ver arriba) — `langgraph` ya está en
+`requirements.txt`, no se necesita ninguna variable de entorno adicional.
+Opcional: `AUTO_APPROVE_HALLAZGOS=true` en `.env` para pruebas donde
+quieras aprobar hallazgos automáticamente en vez de llamar
+`src.agent.approval.aprobar_hallazgo` a mano.
+
+### Cómo correr los tests del agente
+
+```bash
+pytest tests/test_agent_*.py -v
+```
+
+Deterministas (LLM/retriever/embeddings simulados), **sin gastar API**: las
+herramientas una por una (caso feliz + caso de error), el grafo (secuencia
+no cableada, tope de iteraciones/tokens, guarda de repetición), el plan y
+sus 3 disparadores de replanificación, y el escenario completo de memoria
+de largo plazo entre sesiones (con persistencia real en disco vía
+`tmp_path`, no mock).
+
+### Cómo correr las pruebas `live` (contra Groq real)
+
+Las pruebas que llaman al modelo real están marcadas `@pytest.mark.live` y
+**se excluyen por defecto** (`pytest.ini`: `addopts = -m "not live"`), para
+que la suite normal nunca gaste cuota de API:
+
+```bash
+pytest -m live -v -s          # requiere GROQ_API_KEY en .env
+```
+
+Cada corrida gasta unos pocos miles de tokens (el costo exacto depende del
+escenario: cuántas herramientas termina usando el agente y cuánto crece el
+historial del turno) — a los precios de referencia de Groq usados en este
+proyecto (ver `src/metrics.py`), del orden de **centavos de dólar por
+corrida**, no dólares. Los archivos `tests/test_agent_graph_live.py`,
+`tests/test_agent_long_term_memory_live.py` registran con `print` la
+secuencia de herramientas de cada corrida para inspección manual, además
+de las aserciones automáticas.
+
+**Cifras medidas de corridas reales** (tokens, costo, latencia, por
+escenario, con fecha y hora): ver
+[`docs/evidencia_pruebas.md`](docs/evidencia_pruebas.md) — en progreso, se
+completa a medida que se ejecutan las corridas `live` del agente.
 
 ## Uso de Inteligencia Artificial en este proyecto
 
