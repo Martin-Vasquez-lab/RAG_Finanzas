@@ -7,6 +7,14 @@ langchain-text-splitters>=0.3.0
 # --- Proveedor de CHAT activo por defecto (Groq) --------------------------- #
 langchain-groq>=0.2.0
 
+# --- Orquestación de agentes con herramientas (EP2) ------------------------ #
+# Grafo con estado (plan, hallazgos, contador de iteraciones) y reenrutamiento
+# condicional: el LLM elige la siguiente herramienta mirando el estado, el
+# grafo no fija el orden. Confirmado vía prueba de humo real que el modelo de
+# chat activo (openai/gpt-oss-120b en Groq) soporta tool-calling nativo
+# (ver tests/test_tool_calling.py).
+langgraph>=1.2.0
+
 # --- Proveedor de EMBEDDINGS activo por defecto (local, sin API) ---------- #
 langchain-huggingface>=0.1.0
 sentence-transformers>=3.0.0
