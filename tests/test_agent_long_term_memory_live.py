@@ -98,6 +98,11 @@ def _print_token_summary(label: str, deps: AgentDependencies) -> None:
         f"{resumen['tokens_salida_total']} out | costo ~${resumen['costo_estimado_total_usd']:.6f} USD | "
         f"latencia total {resumen['latencia_total_s']:.1f}s | {resumen['num_llamadas']} llamadas"
     )
+    for tipo, r in deps.token_tracker.summary_by_label().items():
+        print(
+            f"    - {tipo}: {r['num_llamadas']} llamadas | {r['tokens_entrada_total']} in / "
+            f"{r['tokens_salida_total']} out | ~${r['costo_estimado_total_usd']:.6f} USD"
+        )
 
 
 def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):

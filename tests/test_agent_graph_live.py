@@ -115,6 +115,11 @@ def _print_token_summary(label: str, deps: AgentDependencies) -> None:
         f"{resumen['tokens_salida_total']} out | costo ~${resumen['costo_estimado_total_usd']:.6f} USD | "
         f"latencia total {resumen['latencia_total_s']:.1f}s | {resumen['num_llamadas']} llamadas"
     )
+    for tipo, r in deps.token_tracker.summary_by_label().items():
+        print(
+            f"    - {tipo}: {r['num_llamadas']} llamadas | {r['tokens_entrada_total']} in / "
+            f"{r['tokens_salida_total']} out | ~${r['costo_estimado_total_usd']:.6f} USD"
+        )
 
 
 def test_live_consulta_simple_en_clp_no_llama_tipo_cambio_ni_registra_hallazgo(tmp_path):
@@ -168,3 +173,38 @@ def test_live_factura_en_uf_si_llama_tipo_cambio(tmp_path):
     for secuencia in secuencias:
         assert "consultar_tipo_cambio" in secuencia, secuencias
         assert secuencia[0] == "recuperar_documentos", secuencias
+
+
+def test_live_documento_inexistente_no_inventa_datos(tmp_path):
+    """Escenario guardrail anti-alucinación (mismo caso que el few-shot
+    #4 de prompts.py, ya validado en EP1): el contexto solo tiene la
+    factura F-1023; se pregunta por la F-9999, que NO existe. El agente
+    no debe inventar un RUT/monto -en particular, no debe reportar el
+    RUT de F-1023 (76.123.456-7) como si fuera el de F-9999-."""
+    docs = [
+        make_chunk(
+            0,
+            "factura_F1023.txt",
+            "Factura F-1023 | Emisor: Comercial Rios Ltda. | RUT: 76.123.456-7 | Monto total: $1.245.000 CLP",
+        )
+    ]
+    pregunta = "¿Cuál es el RUT del receptor de la factura F-9999?"
+
+    deps = _deps_live(tmp_path / "doc-inexistente-0", docs)
+    resultado = _run_with_rate_limit_backoff(
+        build_agent_graph(deps), deps, pregunta, thread_id="live-doc-inexistente-0"
+    )
+    secuencia = extract_tool_call_sequence(resultado["messages"])
+    respuesta_final = resultado["messages"][-1].content
+    print(f"\n[documento inexistente | corrida 1] secuencia = {secuencia}")
+    print(f"  respuesta final: {respuesta_final!r}")
+    _print_token_summary("documento inexistente", deps)
+
+    assert secuencia and secuencia[0] == "recuperar_documentos", secuencia
+    # No debe filtrarse el RUT de F-1023 (el único dato real disponible)
+    # como si fuera la respuesta a una pregunta sobre F-9999.
+    assert "76.123.456-7" not in respuesta_final, respuesta_final
+    informes_generados = list(deps.informe_store._informes.values())
+    if informes_generados:
+        informe = informes_generados[-1]
+        assert informe.rut_emisor != "76.123.456-7", informe.model_dump_json()

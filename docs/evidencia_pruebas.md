@@ -215,11 +215,65 @@ largo plazo por sí solas costaría ~195.000 tokens — casi el cupo diario
 completo — por lo que el plan se mantiene en 3 corridas por escenario,
 pero repartido en varios días (no 2), respetando el tope de ~70%/día.
 
+## Cambio de criterio tras la Tanda 1: amplitud antes que repetición
+
+IE7 pide demostrar decisiones adaptativas con **múltiples ejemplos
+distintos**, no la misma repetida 3 veces. Las "3 corridas por escenario
+crítico" fueron un estándar propio, no un requisito de la pauta — y con
+el costo real de memoria de largo plazo (~65k/corrida), repetirla 3 veces
+gasta casi un día completo de cupo para añadir poco sobre lo ya
+demostrado (1 corrida real + cobertura determinista completa). Nuevo
+criterio: priorizar 1 corrida de cada escenario que todavía no tiene
+ninguna corrida real; las repeticiones (2ª y 3ª) quedan opcionales al
+final, solo para los escenarios que se vayan a mostrar en la demo.
+
+### Documento inexistente — 2026-10-29, ~17:10 hora local (1 corrida, completada)
+
+Mismo caso que el few-shot #4 de `src/prompts.py` (ya validado
+determinísticamente en EP1): el contexto solo contiene la factura
+F-1023; se pregunta por la F-9999, que no existe.
+
+- **Secuencia:** `recuperar_documentos, recuperar_documentos` (el agente
+  reintentó la búsqueda interna una vez; nunca llegó a llamar
+  `generar_informe` — respondió directo tras concluir que el documento no
+  estaba).
+- **Respuesta final:** *"No dispongo de esta información en los
+  documentos auditados."* — no inventó el RUT de F-1023 (76.123.456-7)
+  como si fuera el de F-9999 (verificado por aserción).
+- **Costo real:** 6.586 in / 631 out = 7.217 tokens, $0,001461 USD,
+  4 llamadas, 3,6 s de latencia — bastante más barato que la estimación
+  (~15.000-20.000), porque el agente nunca llegó a invocar
+  `generar_informe` (el prompt interno más caro, ~2.230 tokens de
+  sistema) ni `juzgar_relevancia`.
+
+**Primer desglose real por tipo de llamada** (con `TokenTracker.summary_by_label()`,
+confirma la hipótesis de que `llm_node` domina el consumo):
+
+| Tipo de llamada | Llamadas | Tokens in/out | Costo |
+|---|---|---|---|
+| `llm_node` (decisión del agente) | 3 | 6.000 / 225 | $0,001069 |
+| `planner` | 1 | 586 / 406 | $0,000392 |
+
+`llm_node` concentra el 91% de los tokens de ENTRADA (reenvía el prompt
+del agente + 7 esquemas de herramientas en cada vuelta), pero su salida
+por llamada es pequeña (~75 tokens, solo decide la siguiente acción).
+`planner` tiene menos tokens de entrada pero una salida relativamente
+grande (406, el plan estructurado completo) para una sola llamada. Dato
+a confirmar con escenarios más largos (memoria de largo plazo, donde
+`llm_node` se llama 7-8 veces) antes de sacar conclusiones sobre dónde
+optimizar — **no se tocaron prompts ni comportamiento**, esto es solo
+observación.
+
 ## Estado y corridas pendientes
 
-Faltan, para completar el paso 7: 2 corridas más de memoria de largo
-plazo, 2 más de cada escenario de ruteo, las 3 de replanificación, y 1
-corrida de cada uno de: hallazgo de riesgo alto (aislado), documento
-inexistente, fuente externa caída, evidencia contradictoria, e inyección
-de instrucciones. Se documentarán aquí a medida que se ejecuten, con
-fecha y hora de cada tanda.
+**Cupo usado hoy (2026-10-29): 112.868 de 200.000 tokens (~56%).** Se
+detiene la ejecución live por hoy aquí, dentro del margen de seguridad
+(~70%).
+
+Faltan, para completar el paso 7, 1 corrida cada uno de: replanificación,
+riesgo alto (aislado), fuente externa caída (aislado, no solo como parte
+de otro escenario), evidencia contradictoria, e inyección de
+instrucciones — planificadas para el día siguiente. Las repeticiones
+(2ª y 3ª corrida) de memoria de largo plazo, consulta simple y factura UF
+quedan opcionales, solo para los escenarios que se vayan a mostrar en la
+demo, y solo si queda cupo al final.

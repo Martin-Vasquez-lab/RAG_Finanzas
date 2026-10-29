@@ -80,3 +80,23 @@ class TokenTracker:
             "costo_estimado_total_usd": sum(r.estimated_cost_usd for r in self.records),
             "latencia_total_s": sum(r.latency_seconds for r in self.records),
         }
+
+    def summary_by_label(self) -> dict[str, dict]:
+        """Mismo resumen que `summary()`, pero desglosado por `label`
+        (`llm_node`, `planner`, `replanner`, `juzgar_relevancia`,
+        `generar_informe`, `verificar_afirmaciones`): qué tipo de llamada
+        domina el costo de una corrida, para decidir si hay una palanca de
+        ahorro (p.ej. menos chunks, prompts más cortos) sin tener que
+        adivinar."""
+        labels = sorted({r.label for r in self.records})
+        resultado: dict[str, dict] = {}
+        for label in labels:
+            registros = [r for r in self.records if r.label == label]
+            resultado[label] = {
+                "num_llamadas": len(registros),
+                "tokens_entrada_total": sum(r.input_tokens for r in registros),
+                "tokens_salida_total": sum(r.output_tokens for r in registros),
+                "costo_estimado_total_usd": sum(r.estimated_cost_usd for r in registros),
+                "latencia_total_s": sum(r.latency_seconds for r in registros),
+            }
+        return resultado
