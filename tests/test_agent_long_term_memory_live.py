@@ -51,10 +51,16 @@ CORRIDA_OFFSET = 1  # corrida 0 ya hecha el 2026-10-29, ver docs/evidencia_prueb
 
 
 class _FakeRetrieverForLive:
+    """Ver test_agent_graph_live.py: registra las consultas recibidas
+    (`.calls`) para poder inspeccionar, tras una corrida, con qué
+    `pregunta` exacta el agente llamó recuperar_documentos cada vez."""
+
     def __init__(self, docs):
         self._docs = docs
+        self.calls: list[str] = []
 
     def invoke(self, query, config=None):
+        self.calls.append(query)
         return self._docs
 
 
@@ -103,6 +109,9 @@ def _print_token_summary(label: str, deps: AgentDependencies) -> None:
             f"    - {tipo}: {r['num_llamadas']} llamadas | {r['tokens_entrada_total']} in / "
             f"{r['tokens_salida_total']} out | ~${r['costo_estimado_total_usd']:.6f} USD"
         )
+    if getattr(deps.retriever, "calls", None):
+        for idx, consulta in enumerate(deps.retriever.calls, start=1):
+            print(f"    - recuperar_documentos llamada {idx}: pregunta={consulta!r}")
 
 
 def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):

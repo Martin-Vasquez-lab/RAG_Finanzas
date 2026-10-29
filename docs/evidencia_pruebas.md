@@ -246,8 +246,11 @@ F-1023; se pregunta por la F-9999, que no existe.
   `generar_informe` (el prompt interno más caro, ~2.230 tokens de
   sistema) ni `juzgar_relevancia`.
 
-**Primer desglose real por tipo de llamada** (con `TokenTracker.summary_by_label()`,
-confirma la hipótesis de que `llm_node` domina el consumo):
+**Primer desglose real por tipo de llamada** (con `TokenTracker.summary_by_label()`;
+esta corrida nunca llegó a invocar `generar_informe`, así que esto es
+**consistente con la hipótesis** de que `llm_node` domina el consumo, no
+una confirmación — hace falta repetirlo en escenarios que sí completen el
+flujo, como memoria de largo plazo, antes de sacar una conclusión):
 
 | Tipo de llamada | Llamadas | Tokens in/out | Costo |
 |---|---|---|---|
