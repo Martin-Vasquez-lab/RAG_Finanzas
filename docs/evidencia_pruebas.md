@@ -144,3 +144,82 @@ python tests/manual_benchmark_groq.py    # corre las 5 preguntas contra Groq rea
 
 Requiere `GROQ_API_KEY` configurada en `.env`. La fuente externa
 (`mindicador.cl`) no requiere ninguna clave.
+
+---
+
+# EP2 — Agente funcional: evidencia de corridas `live`
+
+A diferencia de la sección anterior (EP1, una corrida puntual), el agente
+de EP2 se valida con **escenarios repetidos** (el enrutamiento de un LLM
+real no es determinista de una corrida a otra) contra Groq real, marcados
+`@pytest.mark.live` en `tests/test_agent_*_live.py`. Cada corrida deja un
+registro de tokens/costo/latencia MEDIDO (`src/agent/token_tracker.py`,
+misma tabla de precios que `AuditCallbackHandler`), no estimado.
+
+**Metodología de ejecución** (acordada para no repetir el problema de
+cuota): por tandas, empezando con 1 corrida de cada escenario crítico
+antes de lanzar las demás; detención si el consumo acumulado del día
+supera ~70% del cupo diario (140.000 de 200.000 tokens/día en la cuenta
+usada); se registran TODAS las corridas, incluidas las fallidas o
+interrumpidas, con fecha y hora.
+
+## Corridas fallidas/interrumpidas durante el desarrollo (2026-10-28)
+
+Antes de llegar a una corrida limpia del escenario de memoria de largo
+plazo, varios intentos fallaron — cada uno encontró un problema real
+(nunca una herramienta oculta ni un parche silencioso):
+
+| # | Escenario | Qué falló | Causa raíz | Corrección |
+|---|---|---|---|---|
+| 1 | Grafo (consulta simple) | `groq.BadRequestError`: el modelo generó un `tool_call` a `judzar_relevancia` (nombre inexistente, typo de `juzgar_relevancia`) | Error de GENERACIÓN del proveedor, no de ejecución de herramienta — no lo cubría `tools.py` | `llm_node` reintenta acotado con una corrección explícita (commit `707bc4d`) |
+| 2 | Memoria largo plazo, sesión A | El modelo registró el hallazgo de NC-045 (fraude de manual) con `nivel_riesgo="medio"`, no `"alto"` → no quedó pendiente | `AGENT_SYSTEM_PROMPT` no tenía criterio de calibración de riesgo para `registrar_hallazgo` (a diferencia del prompt interno de `generar_informe`, que sí tiene few-shot) | Se agregó el criterio explícito al prompt del agente (commit `e43526f`) |
+| 3 | Memoria largo plazo, sesión B | `UnicodeEncodeError` al imprimir la respuesta del modelo (contenía `‑` U+2011) | Consola Windows (cp1252), no un bug del agente | `sys.stdout.reconfigure(encoding="utf-8")` en los archivos `_live` |
+| 4 | Memoria largo plazo, sesión B | Aserción del test exigía el UUID crudo del hallazgo en la respuesta en prosa al auditor | Aserción poco realista (mala UX esperar un UUID en texto natural); además `FindingsIndex.search()` no devolvía `nivel_riesgo` | Aserción relajada a verificar el ID en la OBSERVACIÓN de la herramienta; se agregó `nivel_riesgo` a `search()` |
+| 5 | Memoria largo plazo, sesión A | `secuencia_a = []`: el turno terminó vacío en ~50s sin usar ninguna herramienta | `llm_node` y `tools._safe()` atrapaban **cualquier** excepción, incluyendo `RateLimitError`, convirtiéndola en "no se pudo completar" en vez de dejarla propagar para el reintento con espera | Ambos re-lanzan `RateLimitError` explícitamente (commit `e43526f`) |
+| 6 | Memoria largo plazo, sesión A (tras la corrección #5) | `groq.RateLimitError`: "tokens per day (TPD): Limit 200000, Used 199338" durante el nodo `replanner` | Cupo DIARIO de la cuenta casi agotado por la depuración acumulada del día, no un bug | Se detuvo la ejecución live por ese día (sin corrida limpia de extremo a extremo el 2026-10-28) |
+
+## Tanda 1 — 2026-10-29, ~16:30 hora local (completada, 3/3 escenarios)
+
+Primera corrida de cada escenario crítico (memoria de largo plazo, ruteo
+consulta simple, ruteo factura UF), con `src/agent/token_tracker.py`
+conectado. Las 3 pasaron.
+
+| Escenario | Secuencia de herramientas | Tokens in/out | Costo real | Llamadas | Latencia |
+|---|---|---|---|---|---|
+| Memoria largo plazo — sesión A | `recuperar_documentos, juzgar_relevancia, registrar_hallazgo, recuperar_documentos, buscar_hallazgos_previos, generar_informe, verificar_afirmaciones` | 26.044 / 4.579 | $0,007341 | 13 | 155,7 s |
+| Memoria largo plazo — sesión B (relacionada) | `recuperar_documentos, buscar_hallazgos_previos` | 6.599 / 1.307 | $0,001970 | 4 | 54,2 s |
+| Memoria largo plazo — control negativo | `recuperar_documentos, juzgar_relevancia, generar_informe, verificar_afirmaciones, generar_informe, verificar_afirmaciones` | 21.926 / 4.445 | $0,006623 | 12 | 83,0 s |
+| **Memoria largo plazo — total corrida 1** | | **54.569 / 10.331** | **$0,015934** | **29** | **292,9 s** |
+| Consulta simple (ruteo) — corrida 1 | `recuperar_documentos, juzgar_relevancia, generar_informe, verificar_afirmaciones` | 15.601 / 2.836 | $0,004467 | 9 | 111,6 s |
+| Factura en UF (ruteo) — corrida 1 | `recuperar_documentos, juzgar_relevancia, consultar_tipo_cambio, generar_informe, verificar_afirmaciones` | 18.594 / 3.720 | $0,005579 | 10 | 120,5 s |
+| **Total tanda 1** | | **~88.764 / ~16.887 (105.651 tokens)** | **$0,025980** | **48** | **~525 s** |
+
+**Lectura de la sesión B relacionada (memoria de largo plazo):** el agente
+respondió primero `"No dispongo de esta información en los documentos
+auditados"` (correcto: `recuperar_documentos` no encontró nada relevante
+en esa sesión nueva) y a continuación citó, desde `buscar_hallazgos_previos`,
+la descripción y el nivel de riesgo REAL del hallazgo registrado en la
+sesión A — sin inventar uno, sin reutilizar el historial de corto plazo
+(sesión/`thread_id` distinto). El `finding_id` recuperado coincidió con el
+registrado y aprobado en la sesión A (verificado por aserción, ver
+`tests/test_agent_long_term_memory_live.py`).
+
+**Observación de costo real vs. estimado:** la estimación previa a esta
+tanda (basada en tamaño de prompts + secuencias observadas el día
+anterior) calculó ~36.900 tokens para memoria de largo plazo; la corrida
+real costó 64.900 (+76%), porque el modelo tomó pasos adicionales no
+anticipados (una segunda `recuperar_documentos` en sesión A, dos intentos
+de `generar_informe` en el control negativo antes de conformarse con la
+respuesta). Con este dato real, completar las 3 corridas de memoria de
+largo plazo por sí solas costaría ~195.000 tokens — casi el cupo diario
+completo — por lo que el plan se mantiene en 3 corridas por escenario,
+pero repartido en varios días (no 2), respetando el tope de ~70%/día.
+
+## Estado y corridas pendientes
+
+Faltan, para completar el paso 7: 2 corridas más de memoria de largo
+plazo, 2 más de cada escenario de ruteo, las 3 de replanificación, y 1
+corrida de cada uno de: hallazgo de riesgo alto (aislado), documento
+inexistente, fuente externa caída, evidencia contradictoria, e inyección
+de instrucciones. Se documentarán aquí a medida que se ejecuten, con
+fecha y hora de cada tanda.
