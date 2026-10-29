@@ -22,8 +22,10 @@ from src.agent.graph import (
     build_agent_graph,
     extract_tool_call_sequence,
     run_agent_turn,
+    run_demo_cli,
 )
 from src.agent.informe_store import InformeStore
+from src.agent.token_tracker import TokenTracker
 from src.agent.tools import AgentDependencies
 from src.external_data import IndicadoresExternos
 from tests.agent_test_helpers import (
@@ -283,3 +285,44 @@ def test_el_plan_actualizado_influye_causalmente_en_la_siguiente_herramienta_ele
 
     secuencia = extract_tool_call_sequence(result["messages"])
     assert secuencia == ["recuperar_documentos", "registrar_hallazgo", "buscar_hallazgos_previos"]
+
+
+# --------------------------------------------------------------------------- #
+# Punto de entrada de la demo (`python -m src.agent.graph`): arranca con un
+# LLM simulado, sin gastar API. No prueba la construcción de dependencias
+# REALES (build_demo_dependencies, que sí requiere GROQ_API_KEY y el índice
+# FAISS) -eso se verifica manualmente al correr la demo de verdad-, solo el
+# bucle interactivo (run_demo_cli) en sí.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_demo_cli_arranca_y_corre_un_turno_sin_api(tmp_path):
+    deps = _deps(tmp_path, ScriptedToolCallingLLM([ai_final("Respuesta de prueba.")]))
+    deps.token_tracker = TokenTracker(model_name="modelo-de-prueba")
+
+    entradas = iter(["sesion-prueba", "1", "salir"])
+    salidas: list[str] = []
+
+    run_demo_cli(deps, input_fn=lambda _mensaje: next(entradas), print_fn=salidas.append)
+
+    texto = "\n".join(salidas)
+    assert "Sesión: sesion-prueba" in texto
+    assert "Escenarios documentados" in texto
+    assert "[Pensamiento/Respuesta] Respuesta de prueba." in texto
+    assert "Plan vigente v1" in texto
+    assert "Resumen de la sesión" in texto
+
+
+def test_run_demo_cli_entrada_vacia_termina_sin_correr_ningun_turno(tmp_path):
+    """Si no se elige ningún escenario ni se escribe una pregunta, el
+    bucle debe terminar limpio sin invocar al LLM en absoluto (ID de
+    sesión y luego Enter directo)."""
+    llm = ScriptedToolCallingLLM([])  # cualquier .invoke() aquí haría fallar el test
+    deps = _deps(tmp_path, llm)
+
+    entradas = iter(["sesion-vacia", ""])
+    salidas: list[str] = []
+
+    run_demo_cli(deps, input_fn=lambda _mensaje: next(entradas), print_fn=salidas.append)
+
+    assert llm.calls == 0

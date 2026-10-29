@@ -74,11 +74,16 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
+from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.chunk_store import ChunkStore
 from src.agent.informe_store import InformeStore
 from src.agent.llm_utils import invoke_with_retry
 from src.agent.plan import PlanAuditoria, PlanPasos
+from src.agent.token_tracker import TokenTracker
 from src.agent.tools import AgentDependencies, build_agent_tools
+from src.config import CASE_LOG_PATH, FINDINGS_INDEX_DIR, FINDINGS_INDEX_NAME, get_chat_model, get_embeddings, settings
+from src.external_data import IndicadoresExternos, fetch_indicadores_economicos
+from src.loaders import load_faiss_index
 from src.prompts import NO_DATA_RULE
 
 MAX_ITERATIONS = 8
@@ -468,3 +473,189 @@ def extract_tool_call_sequence(messages: list[AnyMessage]) -> list[str]:
         if tool_calls:
             sequence.extend(tc["name"] for tc in tool_calls)
     return sequence
+
+
+# --------------------------------------------------------------------------- #
+# Demo / CLI interactiva: `python -m src.agent.graph`
+#
+# Usa los componentes REALES del proyecto (índice FAISS de data/raw/,
+# Groq, memoria de largo plazo persistida en disco) — no los fakes de
+# tests/agent_test_helpers.py. Por eso requiere `python -m src.loaders`
+# corrido antes (construye el índice) y `GROQ_API_KEY` en `.env`.
+# --------------------------------------------------------------------------- #
+
+ESCENARIOS_DEMO: dict[str, dict[str, str]] = {
+    "1": {
+        "nombre": "Consulta simple (factura F-1023, CLP)",
+        "pregunta": "¿Cuál es el monto total y el RUT del emisor en la factura F-1023?",
+    },
+    "2": {
+        "nombre": "Factura en UF (contrato CA-078)",
+        "pregunta": (
+            "¿Cuál es el canon de arriendo del contrato CA-078 en UF, y a cuánto "
+            "equivale en CLP con el valor de la UF de hoy?"
+        ),
+    },
+    "3": {
+        "nombre": "Riesgo alto (nota de crédito NC-045)",
+        "pregunta": "¿Existen señales de riesgo de fraude en la nota de crédito NC-045?",
+    },
+    "4": {
+        "nombre": "Documento inexistente (guardrail anti-alucinación)",
+        "pregunta": "¿Cuál es el RUT del receptor de la factura F-9999?",
+    },
+    "5": {
+        "nombre": "Fuente externa caída (forzada a propósito para la demo, ver nota abajo)",
+        "pregunta": (
+            "¿Cuál es el canon de arriendo del contrato CA-078 en UF, y a cuánto "
+            "equivale en CLP con el valor de la UF de hoy?"
+        ),
+        "fuente_externa_forzada_no_disponible": "si",
+    },
+    "6": {
+        "nombre": "Memoria de largo plazo (hallazgos previos de NC-045)",
+        "pregunta": "¿Qué se sabe de la nota de crédito NC-045? ¿Hay algún hallazgo registrado?",
+    },
+}
+# Nota: "evidencia contradictoria" e "inyección de instrucciones" no están
+# en este menú porque requieren documentos sintéticos que NO forman parte
+# del corpus real de data/raw/ (no se agregaron ahí para no alterar el
+# corpus de la EP1/EP2 sin aprobación). Esos dos escenarios viven en
+# tests/test_agent_graph_live.py con sus propios documentos de prueba.
+
+
+def build_demo_dependencies(forzar_fuente_externa_no_disponible: bool = False) -> AgentDependencies:
+    """Construye `AgentDependencies` con los componentes REALES del
+    proyecto: índice FAISS de `data/raw/` (requiere haber corrido antes
+    `python -m src.loaders`), el modelo de chat configurado (requiere
+    `GROQ_API_KEY`), embeddings locales, y memoria de largo plazo
+    persistida en disco (`settings.CASE_LOG_PATH` /
+    `settings.FINDINGS_INDEX_DIR`, ambos ignorados por git)."""
+    settings.validate_chat()
+    vectorstore = load_faiss_index()
+
+    def external_fetch() -> IndicadoresExternos:
+        if forzar_fuente_externa_no_disponible:
+            return IndicadoresExternos(
+                fecha_consulta="(forzado por la demo)",
+                disponible=False,
+                error="Forzado a no disponible por el escenario 'fuente externa caída' de la demo.",
+            )
+        return fetch_indicadores_economicos()
+
+    return AgentDependencies(
+        retriever=vectorstore.as_retriever(search_kwargs={"k": settings.retriever_k}),
+        llm=get_chat_model(),
+        chunk_store=ChunkStore(),
+        informe_store=InformeStore(),
+        case_log=CaseLog(CASE_LOG_PATH),
+        findings_index=FindingsIndex(get_embeddings(), persist_dir=FINDINGS_INDEX_DIR, index_name=FINDINGS_INDEX_NAME),
+        external_fetch=external_fetch,
+        token_tracker=TokenTracker(model_name=settings.groq_chat_model),
+    )
+
+
+def _pedir_entrada(mensaje: str, input_fn) -> str:
+    try:
+        return input_fn(mensaje)
+    except (EOFError, StopIteration):
+        return ""
+
+
+def _imprimir_traza(mensajes_nuevos: list[AnyMessage], print_fn) -> None:
+    """Pensamiento -> Acción -> Observación, a partir de los mensajes
+    NUEVOS de este turno (no todo el historial de la sesión)."""
+    for msg in mensajes_nuevos:
+        tipo = type(msg).__name__
+        contenido = getattr(msg, "content", "") or ""
+        if tipo == "AIMessage":
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
+                for tc in tool_calls:
+                    print_fn(f"  [Acción] {tc['name']}({tc['args']})")
+            elif contenido:
+                print_fn(f"  [Pensamiento/Respuesta] {contenido}")
+        elif tipo == "ToolMessage":
+            recorte = contenido if len(contenido) <= 300 else contenido[:300] + "…"
+            print_fn(f"  [Observación] {recorte}")
+        elif tipo == "HumanMessage" and contenido.startswith("[PLAN"):
+            print_fn(f"  [Plan] {contenido}")
+
+
+def run_demo_cli(deps: AgentDependencies, input_fn=input, print_fn=print) -> None:
+    """Bucle interactivo de la demo (`python -m src.agent.graph`). No
+    requiere editar código: el `thread_id`, el escenario/pregunta, y
+    cuándo terminar se piden todos por `input_fn` (por defecto `input()`
+    real). `deps`/`input_fn`/`print_fn` son inyectables para poder
+    probar este bucle de forma determinista sin gastar API -ver
+    `tests/test_agent_graph.py::test_run_demo_cli_...`-."""
+    print_fn("=== Demo del agente de auditoría (EP2) ===")
+    thread_id = (
+        _pedir_entrada(
+            "ID de sesión (Enter para generar uno nuevo; reutiliza uno existente para continuar esa sesión): ",
+            input_fn,
+        ).strip()
+        or f"demo-{int(time.time())}"
+    )
+    print_fn(f"Sesión: {thread_id}\n")
+
+    graph = build_agent_graph(deps)
+
+    while True:
+        print_fn("Escenarios documentados:")
+        for clave, escenario in ESCENARIOS_DEMO.items():
+            print_fn(f"  {clave}) {escenario['nombre']}")
+        print_fn("  (o escribe directamente tu propia pregunta)")
+        entrada = _pedir_entrada("\nElige un número, escribe una pregunta, o 'salir': ", input_fn).strip()
+
+        if not entrada or entrada.lower() in {"salir", "exit", "quit"}:
+            break
+
+        escenario = ESCENARIOS_DEMO.get(entrada)
+        pregunta = escenario["pregunta"] if escenario else entrada
+
+        external_fetch_original = deps.external_fetch
+        if escenario and escenario.get("fuente_externa_forzada_no_disponible"):
+            deps.external_fetch = lambda: IndicadoresExternos(
+                fecha_consulta="(forzado por la demo)",
+                disponible=False,
+                error="Forzado a no disponible por el escenario 'fuente externa caída' de la demo.",
+            )
+
+        snapshot_previo = graph.get_state({"configurable": {"thread_id": thread_id}})
+        mensajes_antes = len(snapshot_previo.values.get("messages", [])) if snapshot_previo.values else 0
+        registros_antes = len(deps.token_tracker.records) if deps.token_tracker is not None else 0
+
+        print_fn(f"\n>>> {pregunta}\n")
+        resultado = run_agent_turn(graph, deps, pregunta, thread_id=thread_id)
+
+        deps.external_fetch = external_fetch_original
+
+        _imprimir_traza(resultado["messages"][mensajes_antes:], print_fn)
+
+        plan = resultado.get("plan") or {}
+        print_fn(f"\n  [Plan vigente v{resultado.get('plan_version', 0)}] {len(plan.get('pasos', []))} paso(s)")
+
+        if deps.token_tracker is not None:
+            registros_turno = deps.token_tracker.records[registros_antes:]
+            tokens_in = sum(r.input_tokens for r in registros_turno)
+            tokens_out = sum(r.output_tokens for r in registros_turno)
+            costo = sum(r.estimated_cost_usd for r in registros_turno)
+            latencia = sum(r.latency_seconds for r in registros_turno)
+            print_fn(
+                f"  [Este turno] {len(registros_turno)} llamadas | {tokens_in} in / {tokens_out} out | "
+                f"~${costo:.6f} USD | {latencia:.1f}s"
+            )
+        print_fn("")
+
+    if deps.token_tracker is not None:
+        resumen = deps.token_tracker.summary()
+        print_fn(
+            f"=== Resumen de la sesión: {resumen['num_llamadas']} llamadas | "
+            f"{resumen['tokens_entrada_total']} in / {resumen['tokens_salida_total']} out | "
+            f"~${resumen['costo_estimado_total_usd']:.6f} USD ==="
+        )
+
+
+if __name__ == "__main__":
+    run_demo_cli(build_demo_dependencies())

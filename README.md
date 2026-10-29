@@ -157,10 +157,19 @@ ofrecen ambas capacidades:
   vía `sentence-transformers` (`all-MiniLM-L6-v2`) corriendo en CPU, **no
   Gemini**. Dos razones: (a) **Groq no ofrece API de embeddings**, así que
   de todas formas se necesitaba un segundo proveedor solo para esa etapa; y
-  (b) al ejecutar embeddings localmente, esa etapa del pipeline no depende
-  de ningún proveedor externo — sin costo, sin llamadas de red, sin cuotas,
-  y sin el riesgo de bloqueo de cuenta que sí afectó a Google (punto 2
-  arriba).
+  (b) al generar los embeddings, esa etapa NO depende de ninguna API de
+  pago ni cuota — corre en CPU, sin el riesgo de bloqueo de cuenta que sí
+  afectó a Google (punto 2 arriba). **Matiz importante:** "local" no
+  significa "sin red" en sentido estricto — la PRIMERA vez que se usa
+  `all-MiniLM-L6-v2` en una máquina, `sentence-transformers` descarga los
+  pesos del modelo (~90 MB) desde Hugging Face Hub (requiere internet esa
+  vez; verás `Warning: You are sending unauthenticated requests to the HF
+  Hub` — no bloquea nada, es solo informativo, opcionalmente se evita
+  configurando `HF_TOKEN`). Las ejecuciones siguientes sí son 100% offline
+  (el modelo queda cacheado localmente). Las llamadas de red reales y
+  recurrentes del proyecto son: **Groq** (todas las preguntas al agente) y
+  **mindicador.cl** (fuente externa, UF/dólar/UTM) — ambas documentadas y
+  con degradación con gracia si fallan.
 - **Google AI Studio/Gemini** (el proveedor que exige explícitamente el
   enunciado del EP1, con `text-embedding-004` + Gemini) **se mantiene
   disponible e íntegro** en `src/config.py` para uso futuro: basta con
@@ -408,6 +417,40 @@ Las mismas que la EP1 (ver arriba) — `langgraph` ya está en
 Opcional: `AUTO_APPROVE_HALLAZGOS=true` en `.env` para pruebas donde
 quieras aprobar hallazgos automáticamente en vez de llamar
 `src.agent.approval.aprobar_hallazgo` a mano.
+
+### Demo interactiva (`python -m src.agent.graph`)
+
+Punto de entrada pensado tanto para la presentación en vivo como para que
+cualquier evaluador pruebe el agente sin tocar código ni leer los tests:
+
+```bash
+python -m src.loaders          # una vez: construye el índice FAISS de data/raw/
+python -m src.agent.graph       # requiere GROQ_API_KEY en .env
+```
+
+Al ejecutarlo:
+
+1. Pide un **ID de sesión** (Enter genera uno nuevo; reutilizar el mismo ID
+   en una corrida posterior continúa esa sesión — útil para probar
+   replanificación por mensaje de seguimiento).
+2. En cada turno, deja elegir un **escenario documentado** (consulta
+   simple, factura en UF, riesgo alto, documento inexistente, fuente
+   externa caída -forzada a propósito para la demo-, memoria de largo
+   plazo) o **escribir cualquier pregunta libre**.
+3. Imprime, para cada turno: la traza Pensamiento → Acción → Observación
+   (herramienta por herramienta), el **plan vigente y su versión**, y
+   **tokens/costo/latencia reales de ESE turno** (vía
+   `src/agent/token_tracker.py` — cifras medidas en el momento, nunca
+   inventadas). Al salir (`salir`/Enter vacío), muestra el resumen total
+   de la sesión.
+
+No requiere editar ningún archivo: todo (sesión, escenario/pregunta, salir)
+se elige por teclado en tiempo de ejecución.
+
+> Dos escenarios documentados en `docs/evidencia_pruebas.md` -evidencia
+> contradictoria e inyección de instrucciones- no están en el menú de esta
+> demo porque usan documentos sintéticos que no forman parte del corpus
+> real de `data/raw/`; se ejecutan con `pytest tests/test_agent_graph_live.py -k "contradictoria or inyeccion" -m live`.
 
 ### Cómo correr los tests del agente
 
