@@ -26,6 +26,14 @@ vectorstore/*.pkl
 data/processed/*
 !data/processed/.gitkeep
 
+# --- Índice FAISS de hallazgos (memoria de largo plazo del agente, EP2) ----- #
+vectorstore_hallazgos/*.faiss
+vectorstore_hallazgos/*.pkl
+!vectorstore_hallazgos/.gitkeep
+
+# --- Log de casos (hallazgos de auditoría registrados en runtime, EP2) ------ #
+data/casos/*.jsonl
+
 # --- Cachés de tests / cobertura --------------------------------------------- #
 .pytest_cache/
 .coverage

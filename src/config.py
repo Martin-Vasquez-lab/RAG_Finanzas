@@ -51,6 +51,14 @@ DATA_PROCESSED_DIR: Path = BASE_DIR / "data" / "processed"
 VECTORSTORE_DIR: Path = BASE_DIR / "vectorstore"
 FAISS_INDEX_NAME: str = "auditoria_faiss_index"
 
+# --- Agente EP2: sistema de casos + memoria de largo plazo de hallazgos ---- #
+# Separados a propósito del índice de DOCUMENTOS de arriba: éste es el
+# índice FAISS de HALLAZGOS aprobados (ver src/agent/case_store.py), no de
+# los textos auditados.
+CASE_LOG_PATH: Path = BASE_DIR / "data" / "casos" / "hallazgos.jsonl"
+FINDINGS_INDEX_DIR: Path = BASE_DIR / "vectorstore_hallazgos"
+FINDINGS_INDEX_NAME: str = "hallazgos_faiss_index"
+
 # El proveedor de CHAT y el de EMBEDDINGS se configuran por separado (antes
 # era una única variable): Groq no tiene API de embeddings, así que forzar
 # un único "LLM_PROVIDER" para ambos habría dejado el pipeline RAG
@@ -149,6 +157,17 @@ class Settings:
     # empírica de ambas en docs/comparacion_memoria.md.
     memory_strategy: MemoryStrategy = field(
         default_factory=lambda: os.getenv("MEMORY_STRATEGY", "buffer").lower()  # type: ignore[return-value]
+    )
+
+    # --- Aprobación de hallazgos del agente (EP2) --------------------------- #
+    # NUNCA se lee desde un argumento que el LLM pueda producir: la función de
+    # aprobación (`src/agent/approval.py`) no es una herramienta del agente.
+    # En False (default) un hallazgo de riesgo "alto" queda pendiente hasta
+    # que alguien lo apruebe manualmente; en True, el orquestador del grafo
+    # puede auto-aprobar al cierre del turno (útil para demos grabadas, sin
+    # bloquear en un prompt interactivo en vivo).
+    auto_approve_hallazgos: bool = field(
+        default_factory=lambda: os.getenv("AUTO_APPROVE_HALLAZGOS", "false").lower() == "true"
     )
 
     def validate_chat(self) -> None:
