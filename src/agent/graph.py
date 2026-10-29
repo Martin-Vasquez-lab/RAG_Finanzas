@@ -1,15 +1,27 @@
 """Grafo del agente (EP2, IE1/IE2/IE5): el LLM decide qué herramienta usar
 y en qué orden; el grafo solo ejecuta esa decisión, no fija el orden.
 
-Bucle mínimo (LangGraph):
+Bucle (LangGraph):
 
-    START -> llm -> (¿tool_calls?) -> tools -> llm -> ... -> END
+    START -> planner -> llm -> (¿tool_calls?) -> tools -> llm -> ... -> END
+                                                     |
+                                                     v (hallazgo de riesgo alto)
+                                                 replanner -> llm
 
 `llm` invoca el modelo con las 7 herramientas de `tools.py` vía
 `bind_tools`; mientras la última respuesta traiga `tool_calls`, el grafo
 pasa a `tools`, las ejecuta, y vuelve a `llm` con las observaciones. Si la
 respuesta no trae `tool_calls`, o se alcanza el tope de iteraciones/tokens
 del turno, el grafo termina.
+
+`planner` genera, ANTES de la primera decisión del LLM, un plan priorizado
+(`src/agent/plan.py`) que se inyecta como mensaje en la conversación -no
+solo en un campo interno del estado- para que realmente pese en la
+elección de herramientas, no sea decorativo. `replanner` se dispara con un
+disparador CONCRETO y observable en código: `tools_node` detecta que la
+última herramienta ejecutada fue `registrar_hallazgo` con resultado
+`estado="pendiente_de_aprobación"` (riesgo alto) y enruta a `replanner`
+antes de volver a `llm`, incrementando la versión del plan.
 
 Fuente ÚNICA de historial conversacional: el canal `messages` del estado
 del grafo (acumulado por el checkpointer entre turnos de la misma
@@ -46,6 +58,8 @@ from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -53,6 +67,8 @@ from langgraph.graph.message import add_messages
 
 from src.agent.chunk_store import ChunkStore
 from src.agent.informe_store import InformeStore
+from src.agent.llm_utils import invoke_with_retry
+from src.agent.plan import PlanAuditoria, PlanPasos
 from src.agent.tools import AgentDependencies, build_agent_tools
 from src.prompts import NO_DATA_RULE
 
@@ -79,7 +95,32 @@ Reglas:
   sobre el informe_id que te devolvió, no generes un informe nuevo.
 - Cuando ya tengas una respuesta completa y verificada, responde en
   texto plano sin llamar a ninguna herramienta más: así termina el turno.
+- Verás bloques [PLAN]/[PLAN ACTUALIZADO] en la conversación: son una
+  guía priorizada, no una orden ciega -síguelos salvo que la pregunta
+  concreta amerite desviarte, y dilo si te desvías-.
 """.strip()
+
+NOMBRES_HERRAMIENTAS = (
+    "recuperar_documentos, juzgar_relevancia, consultar_tipo_cambio, generar_informe, "
+    "verificar_afirmaciones, buscar_hallazgos_previos, registrar_hallazgo"
+)
+
+PLAN_SYSTEM_PROMPT = f"""
+Eres el módulo de planificación del agente de auditoría de Banco Andino
+S.A. NO ejecutas nada tú mismo: dado el contexto, propones una lista de
+pasos PRIORIZADOS (prioridad alta/media/baja) que el agente debería
+seguir para resolver la tarea. Cada paso debe usar, como "accion", el
+nombre EXACTO de una de estas herramientas reales: {NOMBRES_HERRAMIENTAS}.
+""".strip()
+
+PLAN_PROMPT_TEMPLATE: ChatPromptTemplate = ChatPromptTemplate.from_messages(
+    [
+        ("system", PLAN_SYSTEM_PROMPT),
+        ("human", "{contexto}\n\n{format_instructions}"),
+    ]
+)
+
+_plan_parser = PydanticOutputParser(pydantic_object=PlanPasos)
 
 
 # --------------------------------------------------------------------------- #
@@ -91,8 +132,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     chunk_store: ChunkStore
     informe_store: InformeStore
-    # Reservados para el paso de planificación priorizada (aún no se usan).
-    plan: dict | None
+    plan: dict | None  # dict de PlanAuditoria; None hasta que corre el nodo "planner"
     plan_version: int
     iteration: int
     last_tool_call: dict | None
@@ -127,6 +167,21 @@ def _tool_call_signature(tool_call: dict) -> dict:
     return {"name": tool_call["name"], "args": tool_call["args"]}
 
 
+def _first_human_message_content(messages: list[AnyMessage]) -> str:
+    """La pregunta ORIGINAL del turno (primer HumanMessage): tanto
+    `planner` como `replanner` la necesitan como contexto, y los mensajes
+    de plan/replan inyectados también son HumanMessage (ver `plan.py`),
+    así que no basta con tomar "el primero" sin filtrar por tipo."""
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            return msg.content
+    return ""
+
+
+def _is_empty_text_response(response: Any) -> bool:
+    return not getattr(response, "content", "").strip()
+
+
 # --------------------------------------------------------------------------- #
 # Nodos
 # --------------------------------------------------------------------------- #
@@ -146,6 +201,52 @@ class AgentGraphBuilder:
     def __post_init__(self) -> None:
         self._tools_by_name = {t.name: t for t in self.tools}
         self._llm_with_tools = self.deps.llm.bind_tools(self.tools)
+        self._plan_chain = (
+            PLAN_PROMPT_TEMPLATE.partial(format_instructions=_plan_parser.get_format_instructions())
+            | self.deps.planner_llm
+        )
+
+    def _generar_pasos_plan(self, contexto: str) -> list:
+        response = invoke_with_retry(
+            lambda: self._plan_chain.invoke({"contexto": contexto}),
+            is_empty=_is_empty_text_response,
+            max_retries=self.deps.max_retries,
+            backoff_seconds=self.deps.retry_backoff_seconds,
+        )
+        try:
+            return _plan_parser.parse(response.content).pasos
+        except Exception:  # noqa: BLE001 - seguir sin plan es preferible a tumbar el turno
+            return []
+
+    def planner_node(self, state: AgentState) -> dict:
+        pregunta = _first_human_message_content(state["messages"])
+        pasos = self._generar_pasos_plan(f"Pregunta del área de auditoría:\n{pregunta}")
+        plan = PlanAuditoria(pasos=pasos, version=1)
+        return {
+            "plan": plan.model_dump(),
+            "plan_version": plan.version,
+            "messages": [HumanMessage(content=plan.render())],
+        }
+
+    def replanner_node(self, state: AgentState) -> dict:
+        pregunta = _first_human_message_content(state["messages"])
+        ultimo_hallazgo = state["messages"][-1].content
+        contexto = (
+            f"Pregunta original del área de auditoría:\n{pregunta}\n\n"
+            "Se acaba de registrar un hallazgo de riesgo ALTO (pendiente de aprobación), "
+            f"resultado de la herramienta: {ultimo_hallazgo}\n\n"
+            "Revisa el plan: sube la prioridad de los pasos relacionados con ese hallazgo "
+            "(p.ej. buscar_hallazgos_previos relacionados, o verificar_afirmaciones si ya "
+            "existe un informe generado)."
+        )
+        pasos_previos = (state.get("plan") or {}).get("pasos", [])
+        pasos = self._generar_pasos_plan(contexto) or pasos_previos
+        plan = PlanAuditoria(pasos=pasos, version=state["plan_version"] + 1)
+        return {
+            "plan": plan.model_dump(),
+            "plan_version": plan.version,
+            "messages": [HumanMessage(content=plan.render(es_replanificacion=True))],
+        }
 
     def llm_node(self, state: AgentState) -> dict:
         """Invoca al LLM con las herramientas disponibles. Si el modelo
@@ -222,13 +323,35 @@ class AgentGraphBuilder:
             return END
         return "tools"
 
+    def route_after_tools(self, state: AgentState) -> str:
+        """Disparador CONCRETO de replanificación: el resultado de la
+        ÚLTIMA herramienta ejecutada fue un hallazgo de riesgo alto
+        (`registrar_hallazgo` -> `estado="pendiente_de_aprobación"`).
+        Revisa solo el último ToolMessage -cubre el caso común de una
+        herramienta a la vez; si el LLM pidiera varias herramientas en
+        paralelo en el mismo paso, un hallazgo que no sea el último no
+        dispara el replan, limitación conocida y no el caso típico aquí."""
+        last = state["messages"][-1]
+        if isinstance(last, ToolMessage):
+            try:
+                payload = json.loads(last.content)
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("estado") == "pendiente_de_aprobación":
+                return "replanner"
+        return "llm"
+
     def build(self):
         graph = StateGraph(AgentState)
+        graph.add_node("planner", self.planner_node)
         graph.add_node("llm", self.llm_node)
         graph.add_node("tools", self.tools_node)
-        graph.add_edge(START, "llm")
+        graph.add_node("replanner", self.replanner_node)
+        graph.add_edge(START, "planner")
+        graph.add_edge("planner", "llm")
         graph.add_conditional_edges("llm", self.route_after_llm, {"tools": "tools", END: END})
-        graph.add_edge("tools", "llm")
+        graph.add_conditional_edges("tools", self.route_after_tools, {"replanner": "replanner", "llm": "llm"})
+        graph.add_edge("replanner", "llm")
         return graph.compile(checkpointer=MemorySaver())
 
 

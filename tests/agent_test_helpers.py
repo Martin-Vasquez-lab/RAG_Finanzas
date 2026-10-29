@@ -123,6 +123,11 @@ INFORME_JSON_OK = (
     '"fuente_externa_utilizada": false, "uf_referencia_clp": null}'
 )
 
+PLAN_JSON_OK = (
+    '{"pasos": [{"orden": 1, "prioridad": "alta", "accion": "recuperar_documentos", '
+    '"razon": "Obtener el contexto necesario antes de cualquier otro paso."}]}'
+)
+
 FACT_CHECK_JSON_OK = (
     '{"afirmaciones": [{"afirmacion": "monto_total=1245000", "veredicto": "Soportado", '
     '"evidencia": "Monto total: $1.245.000 CLP"}]}'

@@ -12,6 +12,8 @@ puede demostrar una corrida contra Groq real, ver el archivo `_live`.
 
 from __future__ import annotations
 
+from langchain_core.runnables import Runnable
+
 from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.chunk_store import ChunkStore
 from src.agent.graph import (
@@ -25,6 +27,8 @@ from src.agent.informe_store import InformeStore
 from src.agent.tools import AgentDependencies
 from src.external_data import IndicadoresExternos
 from tests.agent_test_helpers import (
+    PLAN_JSON_OK,
+    FakeChatModel,
     FakeEmbeddings,
     FakeRetriever,
     ScriptedToolCallingLLM,
@@ -34,13 +38,18 @@ from tests.agent_test_helpers import (
 )
 
 
-def _deps(tmp_path, llm, retriever_docs=None):
+def _deps(tmp_path, llm, retriever_docs=None, planner_llm=None):
     return AgentDependencies(
         retriever=FakeRetriever(
             retriever_docs
             or [make_chunk(0, "factura_F1023.txt", "Factura F-1023 | Monto total: $1.245.000 CLP")]
         ),
         llm=llm,
+        # El planificador usa un LLM SEPARADO del guion de decisiones de
+        # herramientas (ScriptedToolCallingLLM): si compartieran la misma
+        # cola, la llamada de planificación consumiría por error el
+        # siguiente tool_call que el test esperaba para el bucle principal.
+        planner_llm=planner_llm or FakeChatModel([PLAN_JSON_OK] * 10),
         chunk_store=ChunkStore(),
         informe_store=InformeStore(),
         case_log=CaseLog(tmp_path / "hallazgos.jsonl"),
@@ -140,3 +149,93 @@ def test_guarda_contra_llamada_identica_consecutiva_no_la_ejecuta_de_nuevo(tmp_p
     assert deps.retriever.calls == ["monto de F-1023"]
     tool_messages = [m for m in result["messages"] if type(m).__name__ == "ToolMessage"]
     assert any("idéntica" in m.content for m in tool_messages)
+
+
+# --------------------------------------------------------------------------- #
+# Plan priorizado y replanificación (IE1/IE5): disparador concreto y prueba
+# de que el plan no es decorativo, efectivamente influye en la decisión.
+# --------------------------------------------------------------------------- #
+
+
+def test_hallazgo_de_riesgo_alto_dispara_replanificacion_antes_de_seguir(tmp_path):
+    """Disparador CONCRETO: registrar_hallazgo con nivel_riesgo='alto'
+    (estado pendiente_de_aprobación) fuerza una replanificación antes de
+    la siguiente decisión del LLM. El plan actualizado queda como mensaje
+    en la conversación -no solo en un campo interno del estado- y
+    aparece ANTES del cierre del turno."""
+    script = [
+        ai_tool_call("recuperar_documentos", {"pregunta": "riesgo de NC-045"}, "call-1"),
+        ai_tool_call(
+            "registrar_hallazgo",
+            {
+                "descripcion": "Emisión duplicada del mismo monto en 24 horas",
+                "nivel_riesgo": "alto",
+                "chunk_ids_relacionados": [0],
+            },
+            "call-2",
+        ),
+        ai_final("Hallazgo registrado y plan actualizado."),
+    ]
+    deps = _deps(tmp_path, ScriptedToolCallingLLM(script))
+
+    result = run_agent_turn(build_agent_graph(deps), deps, "riesgo de NC-045", thread_id="sesion-replan")
+
+    assert result["plan_version"] == 2  # v1 del planner inicial + v2 de la replanificación
+    contenidos = [getattr(m, "content", "") for m in result["messages"]]
+    assert any("[PLAN v1]" in c for c in contenidos)
+    indice_plan_actualizado = next(i for i, c in enumerate(contenidos) if "[PLAN ACTUALIZADO v2]" in c)
+    assert indice_plan_actualizado < len(contenidos) - 1  # llega ANTES del mensaje final
+
+
+class _PlanAwareFakeLLM(Runnable):
+    """Fake LLM local a este test: decide su TERCER tool_call mirando si
+    ya ve un mensaje "[PLAN ACTUALIZADO" en el historial que recibe como
+    input. No es razonamiento real -es un guion condicional-, pero prueba
+    el WIRING: que el texto del plan replanificado llega al input del LLM
+    a tiempo para pesar en la siguiente decisión. Si el mensaje llegara
+    tarde (p.ej. después de la llamada al LLM en vez de antes), este fake
+    devolvería la rama de "FALLO" y el test lo detectaría."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages, config=None, **kwargs):
+        self.calls += 1
+        texto = " ".join(getattr(m, "content", "") or "" for m in messages)
+        if self.calls == 1:
+            return ai_tool_call("recuperar_documentos", {"pregunta": "riesgo de NC-045"}, "call-1")
+        if self.calls == 2:
+            return ai_tool_call(
+                "registrar_hallazgo",
+                {
+                    "descripcion": "Emisión duplicada del mismo monto en 24 horas",
+                    "nivel_riesgo": "alto",
+                    "chunk_ids_relacionados": [0],
+                },
+                "call-2",
+            )
+        if self.calls == 3:
+            if "[PLAN ACTUALIZADO" in texto:
+                return ai_tool_call(
+                    "buscar_hallazgos_previos", {"pregunta": "emisión duplicada del mismo monto"}, "call-3"
+                )
+            return ai_final("FALLO: el plan actualizado no llegó a tiempo al input del LLM.")
+        return ai_final("Listo.")
+
+
+def test_el_plan_actualizado_influye_causalmente_en_la_siguiente_herramienta_elegida(tmp_path):
+    """Más exigente que el test anterior: no basta con que el mensaje de
+    replanificación exista en algún lado, tiene que llegar a tiempo para
+    que la SIGUIENTE decisión pueda basarse en él. Si el wiring estuviera
+    roto, la tercera llamada del fake caería en la rama de "FALLO" y la
+    secuencia no incluiría buscar_hallazgos_previos."""
+    llm = _PlanAwareFakeLLM()
+    deps = _deps(tmp_path, llm)
+
+    result = run_agent_turn(build_agent_graph(deps), deps, "riesgo de NC-045", thread_id="sesion-causal")
+
+    secuencia = extract_tool_call_sequence(result["messages"])
+    assert secuencia == ["recuperar_documentos", "registrar_hallazgo", "buscar_hallazgos_previos"]

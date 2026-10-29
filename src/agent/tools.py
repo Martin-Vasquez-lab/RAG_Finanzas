@@ -67,6 +67,16 @@ class AgentDependencies:
     # Expuesto aparte de max_retries para que los tests puedan poner 0 y no
     # esperar segundos reales al ejercitar el camino de reintento.
     retry_backoff_seconds: float = 1.0
+    # LLM usado por el planificador del grafo (src/agent/graph.py). Por
+    # defecto reutiliza `llm` (mismo modelo para planificar y decidir
+    # herramientas, como en producción); se desacopla explícitamente en
+    # tests deterministas del grafo para no compartir la cola de un LLM
+    # simulado con guion fijo entre dos roles distintos.
+    planner_llm: Any = None
+
+    def __post_init__(self) -> None:
+        if self.planner_llm is None:
+            self.planner_llm = self.llm
 
 
 def _safe(label: str, fn: Callable[[], dict]) -> dict:
