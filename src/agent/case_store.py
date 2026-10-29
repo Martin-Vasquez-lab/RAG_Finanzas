@@ -150,11 +150,43 @@ class FindingsIndex:
     APROBADOS. `embeddings` es inyectable (en producción, los embeddings
     locales de `src.config.get_embeddings()`; en tests, un fake
     determinista, ver `tests/agent_test_helpers.py`) para no depender de
-    red ni de un modelo real en la suite determinista."""
+    red ni de un modelo real en la suite determinista.
 
-    def __init__(self, embeddings) -> None:
+    Persistencia en disco OPCIONAL (`persist_dir`): sin ella, la memoria
+    de largo plazo solo vive en memoria del proceso -útil para tests
+    aislados-. Con `persist_dir`, cada `add()` se guarda inmediatamente
+    (mismo patrón que `src/loaders.build_faiss_index`/`load_faiss_index`
+    para el índice de documentos), y una instancia NUEVA construida sobre
+    el mismo `persist_dir` recarga lo ya indexado -es lo que demuestra
+    que la memoria de largo plazo sobrevive a un reinicio del proceso,
+    no solo a una sesión de chat nueva."""
+
+    def __init__(self, embeddings, persist_dir: Path | None = None, index_name: str = "hallazgos_faiss_index") -> None:
         self._embeddings = embeddings
-        self._vectorstore = None  # se crea perezosamente en el primer add()
+        self._persist_dir = persist_dir
+        self._index_name = index_name
+        self._vectorstore = self._load_from_disk_if_exists()
+
+    def _index_file(self) -> Path | None:
+        if self._persist_dir is None:
+            return None
+        return self._persist_dir / f"{self._index_name}.faiss"
+
+    def _load_from_disk_if_exists(self):
+        index_file = self._index_file()
+        if index_file is None or not index_file.exists():
+            return None
+        from langchain_community.vectorstores import FAISS
+
+        return FAISS.load_local(
+            str(self._persist_dir),
+            self._embeddings,
+            index_name=self._index_name,
+            # Seguro en este proyecto: este índice solo lo escribe nuestro
+            # propio código (registrar_hallazgo/aprobar_hallazgo), nunca se
+            # carga un .faiss de origen externo/no confiable.
+            allow_dangerous_deserialization=True,
+        )
 
     def add(self, finding_id: str, descripcion: str, metadata: dict | None = None) -> None:
         from langchain_community.vectorstores import FAISS
@@ -165,9 +197,25 @@ class FindingsIndex:
             self._vectorstore = FAISS.from_documents([doc], self._embeddings)
         else:
             self._vectorstore.add_documents([doc])
+        if self._persist_dir is not None:
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
+            self._vectorstore.save_local(str(self._persist_dir), index_name=self._index_name)
 
     def search(self, query: str, k: int = 3) -> list[dict]:
+        """Devuelve `nivel_riesgo` del metadata original (no solo
+        `finding_id`/`descripcion`): sin esto, un LLM que cita un hallazgo
+        recuperado tendría que RE-INFERIR el riesgo desde el texto de la
+        descripción en vez de leer el valor ya calibrado que se guardó al
+        registrar el hallazgo -observado en vivo: el modelo reportó un
+        nivel de riesgo distinto al realmente registrado."""
         if self._vectorstore is None:
             return []
         docs = self._vectorstore.similarity_search(query, k=k)
-        return [{"finding_id": d.metadata.get("finding_id"), "descripcion": d.page_content} for d in docs]
+        return [
+            {
+                "finding_id": d.metadata.get("finding_id"),
+                "descripcion": d.page_content,
+                "nivel_riesgo": d.metadata.get("nivel_riesgo"),
+            }
+            for d in docs
+        ]

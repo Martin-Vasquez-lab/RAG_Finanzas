@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
+from groq import RateLimitError  # excluido de _safe(), ver docstring
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
@@ -82,9 +83,17 @@ class AgentDependencies:
 def _safe(label: str, fn: Callable[[], dict]) -> dict:
     """Ninguna herramienta debe lanzar una excepción hacia el grafo del
     agente: cualquier falla no anticipada se convierte en una observación
-    de error legible."""
+    de error legible.
+
+    `RateLimitError` es la excepción: convertirla en una observación la
+    "resuelve" en segundos (el LLM sigue adelante sin el dato), cuando lo
+    correcto es que quien orquesta el turno espere a que se reabra la
+    ventana del minuto y reintente (ver `src/agent/graph.py`, mismo
+    criterio aplicado ahí)."""
     try:
         return fn()
+    except RateLimitError:
+        raise
     except Exception as exc:  # noqa: BLE001 - frontera deliberada hacia el grafo
         return {"error": f"{label} falló de forma inesperada: {exc}"}
 

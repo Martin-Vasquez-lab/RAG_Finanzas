@@ -107,6 +107,30 @@ def test_findings_index_search_finds_added_finding():
     assert any(r["finding_id"] == "id-1" for r in resultados)
 
 
+def test_findings_index_sin_persist_dir_no_sobrevive_a_una_instancia_nueva(tmp_path):
+    """Caso base (el usado en la mayoría de los tests): sin persist_dir,
+    la memoria de largo plazo es solo en memoria del proceso."""
+    index_1 = FindingsIndex(FakeEmbeddings())
+    index_1.add("id-1", "Hallazgo efímero", metadata={})
+
+    index_2 = FindingsIndex(FakeEmbeddings())  # instancia nueva, sin persist_dir
+    assert index_2.search("hallazgo efímero") == []
+
+
+def test_findings_index_con_persist_dir_sobrevive_a_una_instancia_nueva(tmp_path):
+    """Con persist_dir, una instancia NUEVA (simula un reinicio del
+    proceso: no reutiliza el objeto Python, solo el directorio en disco)
+    recupera lo que la instancia anterior indexó."""
+    persist_dir = tmp_path / "vectorstore_hallazgos"
+    index_1 = FindingsIndex(FakeEmbeddings(), persist_dir=persist_dir)
+    index_1.add("id-1", "Emisión duplicada del mismo monto en NC-045", metadata={"nivel_riesgo": "alto"})
+
+    index_2 = FindingsIndex(FakeEmbeddings(), persist_dir=persist_dir)  # "reinicio": instancia nueva
+
+    resultados = index_2.search("NC-045 emisión duplicada")
+    assert any(r["finding_id"] == "id-1" for r in resultados)
+
+
 # --------------------------------------------------------------------------- #
 # aprobar_hallazgo: el gate humano, deliberadamente FUERA de las
 # herramientas del LLM (ver también tests/test_agent_tools.py)

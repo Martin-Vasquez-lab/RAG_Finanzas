@@ -17,11 +17,18 @@ del turno, el grafo termina.
 `planner` genera, ANTES de la primera decisión del LLM, un plan priorizado
 (`src/agent/plan.py`) que se inyecta como mensaje en la conversación -no
 solo en un campo interno del estado- para que realmente pese en la
-elección de herramientas, no sea decorativo. `replanner` se dispara con un
-disparador CONCRETO y observable en código: `tools_node` detecta que la
-última herramienta ejecutada fue `registrar_hallazgo` con resultado
-`estado="pendiente_de_aprobación"` (riesgo alto) y enruta a `replanner`
-antes de volver a `llm`, incrementando la versión del plan.
+elección de herramientas, no sea decorativo. `replanner` se dispara con
+TRES disparadores CONCRETOS, todos observables en código (ninguno
+depende de que el LLM "decida" replanificar por su cuenta):
+  1. Hallazgo de riesgo alto: `registrar_hallazgo` devuelve
+     `estado="pendiente_de_aprobación"` (ver `route_after_tools`).
+  2. Condición externa cambiante: una herramienta devuelve
+     `disponible=False` (p.ej. `consultar_tipo_cambio` cuando
+     mindicador.cl está caído) (también en `route_after_tools`).
+  3. Mensaje de seguimiento a mitad de tarea: una pregunta NUEVA en una
+     sesión (`thread_id`) que YA tiene un plan -no la primera pregunta de
+     esa sesión- entra directo a `replanner` en vez de `planner`
+     (ver `route_start`/`run_agent_turn`).
 
 Fuente ÚNICA de historial conversacional: el canal `messages` del estado
 del grafo (acumulado por el checkpointer entre turnos de la misma
@@ -57,6 +64,7 @@ import json
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
+from groq import RateLimitError  # excluido del manejo de errores de generación de llm_node, ver docstring
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -98,6 +106,15 @@ Reglas:
 - Verás bloques [PLAN]/[PLAN ACTUALIZADO] en la conversación: son una
   guía priorizada, no una orden ciega -síguelos salvo que la pregunta
   concreta amerite desviarte, y dilo si te desvías-.
+- Al usar registrar_hallazgo, califica nivel_riesgo="alto" ante señales
+  CLARAS de fraude: duplicidad de montos/documentos en una ventana de
+  24 horas, RUT no coincidentes, montos atípicos sin respaldo, o
+  inconsistencias graves entre documentos. Usa "medio" solo ante
+  inconsistencias menores, y "bajo" cuando el hallazgo es solo
+  informativo. Si ya generaste un informe con generar_informe, el
+  nivel_riesgo de registrar_hallazgo debe ser COHERENTE con el
+  nivel_riesgo_fraude de ese informe -no lo contradigas sin una razón
+  explícita que puedas justificar.
 """.strip()
 
 NOMBRES_HERRAMIENTAS = (
@@ -139,21 +156,6 @@ class AgentState(TypedDict):
     tokens_used: int
 
 
-def initial_state(pregunta: str, deps: AgentDependencies) -> AgentState:
-    """Estado inicial de UN turno (una pregunta). `iteration`/
-    `last_tool_call`/`tokens_used` SIEMPRE arrancan en 0/None/0 aquí: el
-    tope de iteraciones/tokens y la guarda de repetición son por turno,
-    no acumulados a lo largo de toda la sesión."""
-    return AgentState(
-        messages=[SystemMessage(content=AGENT_SYSTEM_PROMPT), HumanMessage(content=pregunta)],
-        chunk_store=deps.chunk_store,
-        informe_store=deps.informe_store,
-        plan=None,
-        plan_version=0,
-        iteration=0,
-        last_tool_call=None,
-        tokens_used=0,
-    )
 
 
 def _extract_tokens(response: AIMessage) -> int:
@@ -228,17 +230,43 @@ class AgentGraphBuilder:
             "messages": [HumanMessage(content=plan.render())],
         }
 
+    def _motivo_replanificacion(self, state: AgentState) -> str:
+        """Determina CUÁL de los 3 disparadores causó esta replanificación,
+        inspeccionando el último mensaje (no le pregunta al LLM por qué):
+        un ToolMessage con `estado="pendiente_de_aprobación"` (hallazgo de
+        riesgo alto), uno con `disponible=False` (fuente externa caída), o
+        -si el último mensaje es un HumanMessage nuevo, no un ToolMessage-
+        un mensaje de seguimiento a mitad de tarea."""
+        last = state["messages"][-1]
+        if isinstance(last, ToolMessage):
+            try:
+                payload = json.loads(last.content)
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("estado") == "pendiente_de_aprobación":
+                return (
+                    "Se acaba de registrar un hallazgo de riesgo ALTO (pendiente de aprobación), "
+                    f"resultado de la herramienta: {last.content}\n"
+                    "Sube la prioridad de los pasos relacionados con ese hallazgo (p.ej. "
+                    "buscar_hallazgos_previos, o verificar_afirmaciones si ya hay un informe)."
+                )
+            if payload.get("disponible") is False:
+                return (
+                    "Una fuente externa dejó de estar disponible a mitad de tarea "
+                    f"(resultado de la herramienta: {last.content}).\n"
+                    "Ajusta el plan para continuar sin ese dato -indícalo explícitamente en el "
+                    "informe en vez de bloquear la tarea esperando que vuelva a estar disponible."
+                )
+        return (
+            "Llegó un mensaje de seguimiento del área de auditoría a mitad de tarea "
+            f'("{getattr(last, "content", "")}"). Ajusta las prioridades del plan considerando '
+            "esta nueva indicación, sin perder de vista lo que ya se había avanzado."
+        )
+
     def replanner_node(self, state: AgentState) -> dict:
         pregunta = _first_human_message_content(state["messages"])
-        ultimo_hallazgo = state["messages"][-1].content
-        contexto = (
-            f"Pregunta original del área de auditoría:\n{pregunta}\n\n"
-            "Se acaba de registrar un hallazgo de riesgo ALTO (pendiente de aprobación), "
-            f"resultado de la herramienta: {ultimo_hallazgo}\n\n"
-            "Revisa el plan: sube la prioridad de los pasos relacionados con ese hallazgo "
-            "(p.ej. buscar_hallazgos_previos relacionados, o verificar_afirmaciones si ya "
-            "existe un informe generado)."
-        )
+        motivo = self._motivo_replanificacion(state)
+        contexto = f"Pregunta original del área de auditoría:\n{pregunta}\n\n{motivo}"
         pasos_previos = (state.get("plan") or {}).get("pasos", [])
         pasos = self._generar_pasos_plan(contexto) or pasos_previos
         plan = PlanAuditoria(pasos=pasos, version=state["plan_version"] + 1)
@@ -257,7 +285,16 @@ class AgentGraphBuilder:
         herramienta, es un error de generación-, así que no lo captura
         `tools.py`. Se reintenta acotado con una corrección explícita; si
         se agotan los reintentos, el turno termina con un mensaje de error
-        en vez de propagar la excepción y tumbar el grafo."""
+        en vez de propagar la excepción y tumbar el grafo.
+
+        Los errores de RATE LIMIT (`RateLimitError`) se EXCLUYEN de este
+        manejo y se dejan propagar: observado en vivo, capturarlos aquí
+        los convertía en "no se pudo completar este paso" (un turno vacío
+        en segundos) en vez de dejar que quien orquesta el turno (p.ej.
+        `_run_with_rate_limit_backoff` en los tests `live`) espere a que
+        se reabra la ventana del minuto y reintente. Es un acoplamiento
+        específico de Groq (el proveedor de chat activo); habría que
+        generalizarlo si el proveedor por defecto cambia."""
         messages = state["messages"]
         response: AIMessage | None = None
         last_exc: Exception | None = None
@@ -266,6 +303,8 @@ class AgentGraphBuilder:
             try:
                 response = self._llm_with_tools.invoke(messages)
                 break
+            except RateLimitError:
+                raise
             except Exception as exc:  # noqa: BLE001 - error de generación del proveedor, no de una herramienta
                 last_exc = exc
                 if attempt < MAX_LLM_GENERATION_RETRIES:
@@ -324,22 +363,33 @@ class AgentGraphBuilder:
         return "tools"
 
     def route_after_tools(self, state: AgentState) -> str:
-        """Disparador CONCRETO de replanificación: el resultado de la
-        ÚLTIMA herramienta ejecutada fue un hallazgo de riesgo alto
-        (`registrar_hallazgo` -> `estado="pendiente_de_aprobación"`).
-        Revisa solo el último ToolMessage -cubre el caso común de una
-        herramienta a la vez; si el LLM pidiera varias herramientas en
-        paralelo en el mismo paso, un hallazgo que no sea el último no
-        dispara el replan, limitación conocida y no el caso típico aquí."""
+        """Dos de los tres disparadores de replanificación (el tercero,
+        mensaje de seguimiento, se detecta en `route_start`): el resultado
+        de la ÚLTIMA herramienta ejecutada fue un hallazgo de riesgo alto
+        (`estado="pendiente_de_aprobación"`) o una fuente externa caída
+        (`disponible=False`). Revisa solo el último ToolMessage -cubre el
+        caso común de una herramienta a la vez; si el LLM pidiera varias
+        herramientas en paralelo en el mismo paso, una señal que no sea la
+        última no dispara el replan, limitación conocida y no el caso
+        típico aquí."""
         last = state["messages"][-1]
         if isinstance(last, ToolMessage):
             try:
                 payload = json.loads(last.content)
             except (TypeError, ValueError):
                 payload = {}
-            if payload.get("estado") == "pendiente_de_aprobación":
+            if payload.get("estado") == "pendiente_de_aprobación" or payload.get("disponible") is False:
                 return "replanner"
         return "llm"
+
+    def route_start(self, state: AgentState) -> str:
+        """Tercer disparador: si la sesión (`thread_id`) YA tiene un plan
+        -esta no es la primera pregunta- la nueva pregunta entra directo a
+        `replanner` (mensaje de seguimiento a mitad de tarea), no a
+        `planner`. Una sesión nueva siempre entra a `planner`."""
+        if state.get("plan"):
+            return "replanner"
+        return "planner"
 
     def build(self):
         graph = StateGraph(AgentState)
@@ -347,7 +397,7 @@ class AgentGraphBuilder:
         graph.add_node("llm", self.llm_node)
         graph.add_node("tools", self.tools_node)
         graph.add_node("replanner", self.replanner_node)
-        graph.add_edge(START, "planner")
+        graph.add_conditional_edges(START, self.route_start, {"planner": "planner", "replanner": "replanner"})
         graph.add_edge("planner", "llm")
         graph.add_conditional_edges("llm", self.route_after_llm, {"tools": "tools", END: END})
         graph.add_conditional_edges("tools", self.route_after_tools, {"replanner": "replanner", "llm": "llm"})
@@ -363,13 +413,41 @@ def build_agent_graph(deps: AgentDependencies):
 
 
 def run_agent_turn(graph: Any, deps: AgentDependencies, pregunta: str, thread_id: str) -> AgentState:
-    """Ejecuta un turno completo (una pregunta) sobre `graph`, ya
-    compilado con `build_agent_graph(deps)`. Reinicia iteration/
-    last_tool_call/tokens_used (ver `initial_state`); el checkpointer
-    conserva igualmente `messages` de turnos previos con el mismo
-    `thread_id`."""
-    state = initial_state(pregunta, deps)
-    return graph.invoke(state, config={"configurable": {"thread_id": thread_id}})
+    """Ejecuta un turno (una pregunta) sobre `graph`, ya compilado con
+    `build_agent_graph(deps)`.
+
+    `iteration`/`last_tool_call`/`tokens_used` SIEMPRE se reinician aquí
+    (0/None/0): el tope de iteraciones/tokens y la guarda de repetición
+    son por turno, no acumulados a lo largo de toda la sesión. `chunk_store`/
+    `informe_store` también se renuevan cada turno (ver `tools.py`:
+    `generar_informe` se valida como máximo una vez por ejecución).
+
+    `plan`/`plan_version` NO se tocan aquí si la sesión ya tenía un plan
+    (se consulta `graph.get_state` antes de invocar): así persisten entre
+    preguntas de la MISMA sesión, lo que es justo lo que permite que
+    `route_start` detecte "esta es una pregunta de seguimiento, no la
+    primera" y fuerce una replanificación en vez de un plan desde cero.
+    Una sesión nueva (sin checkpoint previo) sí arranca con
+    `plan=None, plan_version=0`, y con el SystemMessage del agente -que
+    solo debe aparecer una vez por sesión, no repetirse en cada turno."""
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = graph.get_state(config)
+    es_sesion_nueva = not snapshot.values.get("plan")
+
+    update: dict = {
+        "messages": [HumanMessage(content=pregunta)],
+        "chunk_store": deps.chunk_store,
+        "informe_store": deps.informe_store,
+        "iteration": 0,
+        "last_tool_call": None,
+        "tokens_used": 0,
+    }
+    if es_sesion_nueva:
+        update["messages"] = [SystemMessage(content=AGENT_SYSTEM_PROMPT)] + update["messages"]
+        update["plan"] = None
+        update["plan_version"] = 0
+
+    return graph.invoke(update, config=config)
 
 
 def extract_tool_call_sequence(messages: list[AnyMessage]) -> list[str]:

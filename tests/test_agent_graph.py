@@ -187,6 +187,50 @@ def test_hallazgo_de_riesgo_alto_dispara_replanificacion_antes_de_seguir(tmp_pat
     assert indice_plan_actualizado < len(contenidos) - 1  # llega ANTES del mensaje final
 
 
+def test_fuente_externa_caida_dispara_replanificacion(tmp_path):
+    """Disparador CONCRETO #2: una herramienta que señala una condición
+    externa caída (consultar_tipo_cambio con disponible=False, el default
+    de `_deps` en este archivo) también fuerza una replanificación, no
+    solo el riesgo alto de un hallazgo."""
+    script = [
+        ai_tool_call("consultar_tipo_cambio", {"moneda": "UF"}, "call-1"),
+        ai_final("Sigo sin el dato externo, pero completé el informe igual."),
+    ]
+    deps = _deps(tmp_path, ScriptedToolCallingLLM(script))
+
+    result = run_agent_turn(build_agent_graph(deps), deps, "contrato en UF", thread_id="sesion-api-caida")
+
+    assert result["plan_version"] == 2
+    contenidos = [getattr(m, "content", "") for m in result["messages"]]
+    assert any("[PLAN ACTUALIZADO v2]" in c for c in contenidos)
+
+
+def test_mensaje_de_seguimiento_en_sesion_continua_dispara_replanificacion(tmp_path):
+    """Disparador CONCRETO #3: una segunda pregunta en la MISMA sesión
+    (mismo thread_id) -no la primera- entra directo a `replanner`, no a
+    `planner`: route_start detecta que la sesión ya tenía un plan."""
+    script = [
+        ai_final("Respuesta a la primera pregunta."),
+        ai_final("Respuesta a la pregunta de seguimiento."),
+    ]
+    deps = _deps(tmp_path, ScriptedToolCallingLLM(script))
+    graph = build_agent_graph(deps)
+
+    resultado_1 = run_agent_turn(graph, deps, "primera pregunta", thread_id="sesion-seguimiento")
+    assert resultado_1["plan_version"] == 1
+
+    resultado_2 = run_agent_turn(
+        graph, deps, "ahora lo urgente es la factura F-2000", thread_id="sesion-seguimiento"
+    )
+
+    assert resultado_2["plan_version"] == 2
+    contenidos = [getattr(m, "content", "") for m in resultado_2["messages"]]
+    assert any("[PLAN ACTUALIZADO v2]" in c for c in contenidos)
+    # El System Message del agente no debe repetirse: solo aparece una vez por sesión.
+    system_messages = [m for m in resultado_2["messages"] if type(m).__name__ == "SystemMessage"]
+    assert len(system_messages) == 1
+
+
 class _PlanAwareFakeLLM(Runnable):
     """Fake LLM local a este test: decide su TERCER tool_call mirando si
     ya ve un mensaje "[PLAN ACTUALIZADO" en el historial que recibe como

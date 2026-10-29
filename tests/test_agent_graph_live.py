@@ -13,9 +13,17 @@ de las aserciones automáticas (ver salida de `pytest -s -m live`).
 
 from __future__ import annotations
 
+import sys
 import time
 
 import pytest
+
+# La consola de Windows (cp1252) no puede imprimir todo lo que un modelo
+# real puede generar (p.ej. guiones Unicode especiales); sin esto, un
+# print() de la respuesta del modelo puede hacer fallar el test por un
+# problema de encoding, no de lógica del agente.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from groq import RateLimitError
 
 from src.agent.case_store import CaseLog, FindingsIndex
