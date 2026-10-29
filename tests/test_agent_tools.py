@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.chunk_store import ChunkStore
+from src.agent.informe_store import InformeStore
 from src.agent.tools import AgentDependencies, build_agent_tools
 from src.external_data import IndicadorEconomico, IndicadoresExternos
 from tests.agent_test_helpers import (
@@ -30,6 +31,7 @@ def _deps(tmp_path, llm_responses, retriever_docs=None, external_fetch=None):
         retriever=FakeRetriever(retriever_docs or []),
         llm=FakeChatModel(llm_responses),
         chunk_store=ChunkStore(),
+        informe_store=InformeStore(),
         case_log=CaseLog(tmp_path / "hallazgos.jsonl"),
         findings_index=FindingsIndex(FakeEmbeddings()),
         external_fetch=external_fetch
@@ -184,7 +186,7 @@ def test_consultar_tipo_cambio_api_caida_degrada_con_gracia_no_lanza(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_generar_informe_camino_feliz_devuelve_informe_parseado(tmp_path):
+def test_generar_informe_camino_feliz_devuelve_informe_id_y_parseado(tmp_path):
     deps = _deps(tmp_path, llm_responses=[INFORME_JSON_OK])
     deps.chunk_store.put_many(
         [make_chunk(0, "factura_F1023.txt", "Factura F-1023 | Monto total: $1.245.000 CLP | RUT: 76.123.456-7")]
@@ -195,6 +197,21 @@ def test_generar_informe_camino_feliz_devuelve_informe_parseado(tmp_path):
 
     assert resultado["informe"]["monto_total"] == 1245000
     assert resultado["informe"]["nivel_riesgo_fraude"] == "bajo"
+    assert deps.informe_store.get(resultado["informe_id"]) is not None
+
+
+def test_generar_informe_segunda_vez_en_la_misma_ejecucion_se_rechaza(tmp_path):
+    deps = _deps(tmp_path, llm_responses=[INFORME_JSON_OK])
+    deps.chunk_store.put_many([make_chunk(0, "f.txt", "Monto total: $1.245.000 CLP")])
+    tool = _tool(build_agent_tools(deps), "generar_informe")
+    primero = tool.invoke({"chunk_ids": [0], "pregunta": "pregunta 1"})
+    assert "informe_id" in primero
+
+    segundo = tool.invoke({"chunk_ids": [0], "pregunta": "pregunta 2 en el mismo turno"})
+
+    assert "error" in segundo
+    assert deps.informe_store.count() == 1  # no se agregó un segundo informe
+    assert len(deps.llm.calls) == 1  # ni siquiera llamó al LLM la segunda vez
 
 
 def test_generar_informe_sin_chunk_ids_validos_devuelve_error(tmp_path):
@@ -231,21 +248,39 @@ def test_generar_informe_salida_no_parseable_es_error_no_excepcion(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_verificar_afirmaciones_camino_feliz(tmp_path):
-    deps = _deps(tmp_path, llm_responses=[FACT_CHECK_JSON_OK])
+def test_verificar_afirmaciones_camino_feliz_recibe_informe_id_no_json(tmp_path):
+    # Dos respuestas en orden: la primera para generar_informe, la segunda
+    # para verificar_afirmaciones (mismo deps.llm, dos herramientas).
+    deps = _deps(tmp_path, llm_responses=[INFORME_JSON_OK, FACT_CHECK_JSON_OK])
     deps.chunk_store.put_many([make_chunk(0, "f.txt", "Monto total: $1.245.000 CLP")])
-    tool = _tool(build_agent_tools(deps), "verificar_afirmaciones")
+    tools_by_name = {t.name: t for t in build_agent_tools(deps)}
+    generado = tools_by_name["generar_informe"].invoke({"chunk_ids": [0], "pregunta": "¿monto?"})
 
-    resultado = tool.invoke({"informe_json": INFORME_JSON_OK, "chunk_ids": [0]})
+    resultado = tools_by_name["verificar_afirmaciones"].invoke(
+        {"informe_id": generado["informe_id"], "chunk_ids": [0]}
+    )
 
     assert resultado["afirmaciones"][0]["veredicto"] == "Soportado"
 
 
-def test_verificar_afirmaciones_sin_chunk_ids_validos_devuelve_error(tmp_path):
+def test_verificar_afirmaciones_informe_id_inexistente_devuelve_error(tmp_path):
     deps = _deps(tmp_path, llm_responses=[])
     tool = _tool(build_agent_tools(deps), "verificar_afirmaciones")
 
-    resultado = tool.invoke({"informe_json": "{}", "chunk_ids": [999]})
+    resultado = tool.invoke({"informe_id": "no-existe", "chunk_ids": [0]})
+
+    assert "error" in resultado
+
+
+def test_verificar_afirmaciones_sin_chunk_ids_validos_devuelve_error(tmp_path):
+    deps = _deps(tmp_path, llm_responses=[INFORME_JSON_OK])
+    deps.chunk_store.put_many([make_chunk(0, "f.txt", "texto")])
+    tools_by_name = {t.name: t for t in build_agent_tools(deps)}
+    generado = tools_by_name["generar_informe"].invoke({"chunk_ids": [0], "pregunta": "algo"})
+
+    resultado = tools_by_name["verificar_afirmaciones"].invoke(
+        {"informe_id": generado["informe_id"], "chunk_ids": [999]}
+    )
 
     assert "error" in resultado
 

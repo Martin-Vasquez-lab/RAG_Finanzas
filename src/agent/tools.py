@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.chunk_store import ChunkStore
+from src.agent.informe_store import InformeStore
 from src.agent.llm_utils import invoke_with_retry
 from src.config import settings
 from src.external_data import IndicadoresExternos, fetch_indicadores_economicos, format_external_context
@@ -57,6 +58,7 @@ class AgentDependencies:
     retriever: Any  # objeto con .invoke(str) -> list[Document]: FAISS real o fake en tests
     llm: Any  # chat model LangChain estándar: ChatGroq real o fake en tests
     chunk_store: ChunkStore
+    informe_store: InformeStore
     case_log: CaseLog
     findings_index: FindingsIndex
     judge_min_score: float = field(default_factory=lambda: settings.judge_min_score)
@@ -230,7 +232,10 @@ DESC_GENERAR_INFORME = (
     "consultar_tipo_cambio, pasa su resultado (bloque_contexto) en "
     "contexto_externo. Es la herramienta que produce la RESPUESTA al "
     "usuario: úsala solo cuando ya tengas reunidos los chunk_ids "
-    "necesarios, y solo UNA vez por pregunta."
+    "necesarios. SOLO UNA VEZ por pregunta -un segundo intento en la "
+    "misma ejecución se rechaza con un error-; devuelve un informe_id que "
+    "debes usar tal cual en verificar_afirmaciones (nunca retipees el "
+    "informe)."
 )
 
 
@@ -248,6 +253,11 @@ class GenerarInformeInput(BaseModel):
 def _generar_informe_impl(
     chunk_ids: list[int], pregunta: str, contexto_externo: str | None, deps: AgentDependencies
 ) -> dict:
+    if deps.informe_store.count() > 0:
+        return {
+            "error": "Ya generaste un informe en esta ejecución (una por pregunta). Si necesitas "
+            "corregirlo usa verificar_afirmaciones sobre el informe_id ya obtenido; no generes otro."
+        }
     docs = deps.chunk_store.get_many(chunk_ids)
     if not docs:
         return {
@@ -272,7 +282,8 @@ def _generar_informe_impl(
     except Exception as exc:  # noqa: BLE001 - error de parsing, no de infraestructura
         return {"error": f"No se pudo interpretar la salida del modelo como InformeAuditoria: {exc}"}
 
-    return {"informe": informe.model_dump(), "chunk_ids_usados": chunk_ids}
+    informe_id = deps.informe_store.put(informe)
+    return {"informe_id": informe_id, "informe": informe.model_dump(), "chunk_ids_usados": chunk_ids}
 
 
 # --------------------------------------------------------------------------- #
@@ -282,22 +293,30 @@ def _generar_informe_impl(
 DESC_VERIFICAR_AFIRMACIONES = (
     "Verifica que cada afirmación de un InformeAuditoria YA GENERADO esté "
     "respaldada textualmente por los chunk_ids indicados (detecta "
-    "alucinaciones). Úsala DESPUÉS de generar_informe, nunca antes ni en "
-    "su reemplazo. Especialmente importante si nivel_riesgo_fraude es "
-    "'medio' o 'alto'."
+    "alucinaciones). Recibe el informe_id devuelto por generar_informe -"
+    "NUNCA le copies el contenido del informe-. Úsala DESPUÉS de "
+    "generar_informe, nunca antes ni en su reemplazo. Especialmente "
+    "importante si nivel_riesgo_fraude es 'medio' o 'alto'."
 )
 
 
 class VerificarAfirmacionesInput(BaseModel):
-    informe_json: str = Field(description="El InformeAuditoria generado por generar_informe, como JSON.")
+    informe_id: str = Field(description="El informe_id devuelto por generar_informe (no el texto del informe).")
     chunk_ids: list[int] = Field(description="Los mismos chunk_ids usados para generar ese informe.")
 
 
-def _verificar_afirmaciones_impl(informe_json: str, chunk_ids: list[int], deps: AgentDependencies) -> dict:
+def _verificar_afirmaciones_impl(informe_id: str, chunk_ids: list[int], deps: AgentDependencies) -> dict:
+    informe = deps.informe_store.get(informe_id)
+    if informe is None:
+        return {
+            "error": "No existe un informe con ese informe_id en esta ejecución. "
+            "Llama primero a generar_informe y usa el informe_id que te devuelva."
+        }
     docs = deps.chunk_store.get_many(chunk_ids)
     if not docs:
         return {"error": "Ninguno de los chunk_ids indicados existe en el almacén de esta sesión."}
     context_text = format_docs(docs)
+    informe_json = informe.model_dump_json()
 
     chain = (
         FACT_CHECK_PROMPT_TEMPLATE.partial(format_instructions=fact_check_parser.get_format_instructions())
@@ -411,9 +430,9 @@ def build_agent_tools(deps: AgentDependencies) -> list[StructuredTool]:
             "generar_informe", lambda: _generar_informe_impl(chunk_ids, pregunta, contexto_externo, deps)
         )
 
-    def verificar_afirmaciones(informe_json: str, chunk_ids: list[int]) -> dict:
+    def verificar_afirmaciones(informe_id: str, chunk_ids: list[int]) -> dict:
         return _safe(
-            "verificar_afirmaciones", lambda: _verificar_afirmaciones_impl(informe_json, chunk_ids, deps)
+            "verificar_afirmaciones", lambda: _verificar_afirmaciones_impl(informe_id, chunk_ids, deps)
         )
 
     def buscar_hallazgos_previos(pregunta: str) -> dict:

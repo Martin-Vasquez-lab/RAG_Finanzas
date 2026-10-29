@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import Runnable
 
 _VECTOR_DIM = 64
@@ -79,6 +80,40 @@ class FakeRetriever:
 
 def make_chunk(chunk_id: int, source: str, text: str) -> Document:
     return Document(page_content=text, metadata={"chunk_id": chunk_id, "source": source})
+
+
+class ScriptedToolCallingLLM(Runnable):
+    """LLM simulado para tests del GRAFO (no de herramientas individuales):
+    cada `invoke()` devuelve el siguiente `AIMessage` de un guion fijo
+    (con o sin `tool_calls`). `bind_tools()` se ignora -no valida el
+    esquema real- y devuelve el mismo objeto: el punto de este fake es
+    probar que el GRAFO obedece lo que el "modelo" decide en cada paso,
+    sin cablear ningún orden, no probar razonamiento real."""
+
+    def __init__(self, script: list[AIMessage]):
+        self._script = list(script)
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, input, config=None, **kwargs):  # noqa: A002
+        self.calls += 1
+        if not self._script:
+            raise AssertionError("ScriptedToolCallingLLM: se agotó el guion configurado en el test.")
+        return self._script.pop(0)
+
+
+def ai_tool_call(name: str, args: dict, call_id: str, usage_metadata: dict | None = None) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}],
+        usage_metadata=usage_metadata,
+    )
+
+
+def ai_final(content: str) -> AIMessage:
+    return AIMessage(content=content)
 
 
 INFORME_JSON_OK = (
