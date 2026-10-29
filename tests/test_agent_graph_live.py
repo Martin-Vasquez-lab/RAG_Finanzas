@@ -30,6 +30,7 @@ from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.graph import build_agent_graph, extract_tool_call_sequence, run_agent_turn
 from src.agent.chunk_store import ChunkStore
 from src.agent.informe_store import InformeStore
+from src.agent.token_tracker import TokenTracker
 from src.agent.tools import AgentDependencies
 from src.config import get_chat_model, get_embeddings, settings
 from src.external_data import IndicadorEconomico, IndicadoresExternos
@@ -42,7 +43,11 @@ pytestmark = [
     ),
 ]
 
-N_CORRIDAS = 3
+N_CORRIDAS = 1  # listo para la siguiente tanda (ajustar junto con CORRIDA_OFFSET)
+# Permite correr por tandas (p.ej. 1 corrida para revisar consumo real
+# antes de lanzar las demás) sin repetir thread_ids ya usados: la corrida
+# i real es CORRIDA_OFFSET + i. Ajustar ambas constantes entre tandas.
+CORRIDA_OFFSET = 1  # corrida 0 ya hecha el 2026-10-29, ver docs/evidencia_pruebas.md
 
 _UF_DISPONIBLE = IndicadoresExternos(
     fecha_consulta="2026-10-28",
@@ -99,6 +104,16 @@ def _deps_live(tmp_path, docs, external_fetch=None):
         findings_index=FindingsIndex(get_embeddings()),
         external_fetch=external_fetch
         or (lambda: IndicadoresExternos(fecha_consulta="2026-10-28", disponible=False, error="no usado en este test")),
+        token_tracker=TokenTracker(model_name=settings.groq_chat_model),
+    )
+
+
+def _print_token_summary(label: str, deps: AgentDependencies) -> None:
+    resumen = deps.token_tracker.summary()
+    print(
+        f"  [{label}] tokens: {resumen['tokens_entrada_total']} in / "
+        f"{resumen['tokens_salida_total']} out | costo ~${resumen['costo_estimado_total_usd']:.6f} USD | "
+        f"latencia total {resumen['latencia_total_s']:.1f}s | {resumen['num_llamadas']} llamadas"
     )
 
 
@@ -113,14 +128,15 @@ def test_live_consulta_simple_en_clp_no_llama_tipo_cambio_ni_registra_hallazgo(t
     pregunta = "¿Cuál es el monto total y el RUT del emisor en la factura F-1023?"
 
     secuencias = []
-    for i in range(N_CORRIDAS):
+    for i in range(CORRIDA_OFFSET, CORRIDA_OFFSET + N_CORRIDAS):
         deps = _deps_live(tmp_path / f"simple-{i}", docs)
         resultado = _run_with_rate_limit_backoff(
             build_agent_graph(deps), deps, pregunta, thread_id=f"live-simple-{i}"
         )
         secuencia = extract_tool_call_sequence(resultado["messages"])
         secuencias.append(secuencia)
-        print(f"\n[consulta simple | corrida {i + 1}/{N_CORRIDAS}] secuencia = {secuencia}")
+        print(f"\n[consulta simple | corrida {i + 1}] secuencia = {secuencia}")
+        _print_token_summary("consulta simple", deps)
 
     for secuencia in secuencias:
         assert "consultar_tipo_cambio" not in secuencia, secuencias
@@ -139,14 +155,15 @@ def test_live_factura_en_uf_si_llama_tipo_cambio(tmp_path):
     )
 
     secuencias = []
-    for i in range(N_CORRIDAS):
+    for i in range(CORRIDA_OFFSET, CORRIDA_OFFSET + N_CORRIDAS):
         deps = _deps_live(tmp_path / f"uf-{i}", docs, external_fetch=lambda: _UF_DISPONIBLE)
         resultado = _run_with_rate_limit_backoff(
             build_agent_graph(deps), deps, pregunta, thread_id=f"live-uf-{i}"
         )
         secuencia = extract_tool_call_sequence(resultado["messages"])
         secuencias.append(secuencia)
-        print(f"\n[factura en UF | corrida {i + 1}/{N_CORRIDAS}] secuencia = {secuencia}")
+        print(f"\n[factura en UF | corrida {i + 1}] secuencia = {secuencia}")
+        _print_token_summary("factura en UF", deps)
 
     for secuencia in secuencias:
         assert "consultar_tipo_cambio" in secuencia, secuencias

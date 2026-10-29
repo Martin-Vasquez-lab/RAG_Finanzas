@@ -30,6 +30,7 @@ from src.agent.case_store import CaseLog, FindingsIndex
 from src.agent.chunk_store import ChunkStore
 from src.agent.graph import build_agent_graph, extract_tool_call_sequence, run_agent_turn
 from src.agent.informe_store import InformeStore
+from src.agent.token_tracker import TokenTracker
 from src.agent.tools import AgentDependencies
 from src.config import get_chat_model, get_embeddings, settings
 from src.external_data import IndicadoresExternos
@@ -42,7 +43,11 @@ pytestmark = [
     ),
 ]
 
-N_CORRIDAS = 3
+N_CORRIDAS = 1  # listo para la siguiente tanda (ajustar junto con CORRIDA_OFFSET)
+# Ver test_agent_graph_live.py: permite correr por tandas sin confundir
+# la numeración de corridas en los prints (el aislamiento de datos entre
+# corridas ya lo da tmp_path, que es nuevo en cada invocación de pytest).
+CORRIDA_OFFSET = 1  # corrida 0 ya hecha el 2026-10-29, ver docs/evidencia_pruebas.md
 
 
 class _FakeRetrieverForLive:
@@ -82,11 +87,21 @@ def _deps_live(docs, case_log_path, findings_dir):
         external_fetch=lambda: IndicadoresExternos(
             fecha_consulta="2026-10-28", disponible=False, error="no usado en este test"
         ),
+        token_tracker=TokenTracker(model_name=settings.groq_chat_model),
+    )
+
+
+def _print_token_summary(label: str, deps: AgentDependencies) -> None:
+    resumen = deps.token_tracker.summary()
+    print(
+        f"  [{label}] tokens: {resumen['tokens_entrada_total']} in / "
+        f"{resumen['tokens_salida_total']} out | costo ~${resumen['costo_estimado_total_usd']:.6f} USD | "
+        f"latencia total {resumen['latencia_total_s']:.1f}s | {resumen['num_llamadas']} llamadas"
     )
 
 
 def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):
-    for i in range(N_CORRIDAS):
+    for i in range(CORRIDA_OFFSET, CORRIDA_OFFSET + N_CORRIDAS):
         case_log_path = tmp_path / f"corrida-{i}" / "hallazgos.jsonl"
         findings_dir = tmp_path / f"corrida-{i}" / "vectorstore_hallazgos"
 
@@ -108,7 +123,8 @@ def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):
             thread_id=f"live-A-{i}",
         )
         secuencia_a = extract_tool_call_sequence(resultado_a["messages"])
-        print(f"\n[memoria largo plazo | corrida {i + 1}/{N_CORRIDAS} | sesión A] secuencia = {secuencia_a}")
+        print(f"\n[memoria largo plazo | corrida {i + 1} | sesión A] secuencia = {secuencia_a}")
+        _print_token_summary("sesión A", deps_a)
 
         pendientes = [e for e in deps_a.case_log._read_all() if e["estado"] == "pendiente_de_aprobación"]
         assert pendientes, f"Corrida {i + 1}: el modelo no registró ningún hallazgo pendiente en la sesión A."
@@ -127,8 +143,9 @@ def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):
         )
         secuencia_b = extract_tool_call_sequence(resultado_b["messages"])
         respuesta_b = resultado_b["messages"][-1].content
-        print(f"[memoria largo plazo | corrida {i + 1}/{N_CORRIDAS} | sesión B relacionada] secuencia = {secuencia_b}")
+        print(f"[memoria largo plazo | corrida {i + 1} | sesión B relacionada] secuencia = {secuencia_b}")
         print(f"  respuesta final: {respuesta_b!r}")
+        _print_token_summary("sesión B relacionada", deps_b)
 
         assert "buscar_hallazgos_previos" in secuencia_b, (i, secuencia_b)
 
@@ -163,6 +180,7 @@ def test_live_memoria_de_largo_plazo_entre_sesiones(tmp_path):
             thread_id=f"live-B-control-{i}",
         )
         secuencia_b2 = extract_tool_call_sequence(resultado_b2["messages"])
-        print(f"[memoria largo plazo | corrida {i + 1}/{N_CORRIDAS} | control negativo] secuencia = {secuencia_b2}")
+        print(f"[memoria largo plazo | corrida {i + 1} | control negativo] secuencia = {secuencia_b2}")
+        _print_token_summary("control negativo", deps_b2)
 
         assert "buscar_hallazgos_previos" not in secuencia_b2, (i, secuencia_b2)

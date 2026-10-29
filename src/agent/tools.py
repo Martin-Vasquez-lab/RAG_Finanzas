@@ -31,6 +31,7 @@ ruteo real elige bien entre herramientas de contenido similar).
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -74,6 +75,11 @@ class AgentDependencies:
     # tests deterministas del grafo para no compartir la cola de un LLM
     # simulado con guion fijo entre dos roles distintos.
     planner_llm: Any = None
+    # Opcional: si se provee, cada llamada al LLM (aquí y en graph.py) deja
+    # un registro de tokens/costo/latencia medido (ver token_tracker.py),
+    # usado para docs/evidencia_pruebas.md. None = no registra nada
+    # (compatibilidad con los tests deterministas, que no lo necesitan).
+    token_tracker: Any = None
 
     def __post_init__(self) -> None:
         if self.planner_llm is None:
@@ -100,6 +106,21 @@ def _safe(label: str, fn: Callable[[], dict]) -> dict:
 
 def _is_empty_response(response: Any) -> bool:
     return not getattr(response, "content", "").strip()
+
+
+def _invoke_and_record(deps: AgentDependencies, label: str, call: Callable[[], Any]) -> Any:
+    """`invoke_with_retry` + medición de latencia + registro en
+    `deps.token_tracker` (si existe). Único punto donde las 3 cadenas
+    internas que llaman al LLM (juzgar_relevancia, generar_informe,
+    verificar_afirmaciones) invocan, para no repetir el cronometraje en
+    cada una."""
+    start = time.perf_counter()
+    response = invoke_with_retry(
+        call, is_empty=_is_empty_response, max_retries=deps.max_retries, backoff_seconds=deps.retry_backoff_seconds
+    )
+    if deps.token_tracker is not None:
+        deps.token_tracker.record(label, response, time.perf_counter() - start)
+    return response
 
 
 # --------------------------------------------------------------------------- #
@@ -174,11 +195,8 @@ def _juzgar_relevancia_impl(chunk_ids: list[int], pregunta: str, deps: AgentDepe
     kept: list[int] = []
     for doc in docs:
         cid = doc.metadata.get("chunk_id")
-        response = invoke_with_retry(
-            lambda doc=doc: judge_chain.invoke({"question": pregunta, "chunk": doc.page_content}),
-            is_empty=_is_empty_response,
-            max_retries=deps.max_retries,
-            backoff_seconds=deps.retry_backoff_seconds,
+        response = _invoke_and_record(
+            deps, "juzgar_relevancia", lambda doc=doc: judge_chain.invoke({"question": pregunta, "chunk": doc.page_content})
         )
         score = _parse_score(getattr(response, "content", str(response)))
         puntajes[cid] = score
@@ -287,11 +305,8 @@ def _generar_informe_impl(
     context_text = merge_context(internal_context, contexto_externo) if contexto_externo else internal_context
 
     chain = AUDIT_PROMPT_TEMPLATE.partial(format_instructions=informe_parser.get_format_instructions()) | deps.llm
-    response = invoke_with_retry(
-        lambda: chain.invoke({"context": context_text, "question": pregunta}),
-        is_empty=_is_empty_response,
-        max_retries=deps.max_retries,
-        backoff_seconds=deps.retry_backoff_seconds,
+    response = _invoke_and_record(
+        deps, "generar_informe", lambda: chain.invoke({"context": context_text, "question": pregunta})
     )
     content = getattr(response, "content", "")
     if not content.strip():
@@ -341,11 +356,8 @@ def _verificar_afirmaciones_impl(informe_id: str, chunk_ids: list[int], deps: Ag
         FACT_CHECK_PROMPT_TEMPLATE.partial(format_instructions=fact_check_parser.get_format_instructions())
         | deps.llm
     )
-    response = invoke_with_retry(
-        lambda: chain.invoke({"context": context_text, "answer": informe_json}),
-        is_empty=_is_empty_response,
-        max_retries=deps.max_retries,
-        backoff_seconds=deps.retry_backoff_seconds,
+    response = _invoke_and_record(
+        deps, "verificar_afirmaciones", lambda: chain.invoke({"context": context_text, "answer": informe_json})
     )
     content = getattr(response, "content", "")
     if not content.strip():

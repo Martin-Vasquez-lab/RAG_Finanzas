@@ -61,6 +61,7 @@ serializar/reconstruirse en vez de guardar la referencia directa.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
@@ -208,13 +209,16 @@ class AgentGraphBuilder:
             | self.deps.planner_llm
         )
 
-    def _generar_pasos_plan(self, contexto: str) -> list:
+    def _generar_pasos_plan(self, contexto: str, label: str) -> list:
+        start = time.perf_counter()
         response = invoke_with_retry(
             lambda: self._plan_chain.invoke({"contexto": contexto}),
             is_empty=_is_empty_text_response,
             max_retries=self.deps.max_retries,
             backoff_seconds=self.deps.retry_backoff_seconds,
         )
+        if self.deps.token_tracker is not None:
+            self.deps.token_tracker.record(label, response, time.perf_counter() - start)
         try:
             return _plan_parser.parse(response.content).pasos
         except Exception:  # noqa: BLE001 - seguir sin plan es preferible a tumbar el turno
@@ -222,7 +226,7 @@ class AgentGraphBuilder:
 
     def planner_node(self, state: AgentState) -> dict:
         pregunta = _first_human_message_content(state["messages"])
-        pasos = self._generar_pasos_plan(f"Pregunta del área de auditoría:\n{pregunta}")
+        pasos = self._generar_pasos_plan(f"Pregunta del área de auditoría:\n{pregunta}", label="planner")
         plan = PlanAuditoria(pasos=pasos, version=1)
         return {
             "plan": plan.model_dump(),
@@ -268,7 +272,7 @@ class AgentGraphBuilder:
         motivo = self._motivo_replanificacion(state)
         contexto = f"Pregunta original del área de auditoría:\n{pregunta}\n\n{motivo}"
         pasos_previos = (state.get("plan") or {}).get("pasos", [])
-        pasos = self._generar_pasos_plan(contexto) or pasos_previos
+        pasos = self._generar_pasos_plan(contexto, label="replanner") or pasos_previos
         plan = PlanAuditoria(pasos=pasos, version=state["plan_version"] + 1)
         return {
             "plan": plan.model_dump(),
@@ -298,6 +302,7 @@ class AgentGraphBuilder:
         messages = state["messages"]
         response: AIMessage | None = None
         last_exc: Exception | None = None
+        start = time.perf_counter()
 
         for attempt in range(MAX_LLM_GENERATION_RETRIES + 1):
             try:
@@ -322,6 +327,8 @@ class AgentGraphBuilder:
             response = AIMessage(
                 content=f"No se pudo completar este paso tras {MAX_LLM_GENERATION_RETRIES + 1} intentos: {last_exc}"
             )
+        elif self.deps.token_tracker is not None:
+            self.deps.token_tracker.record("llm_node", response, time.perf_counter() - start)
 
         return {
             "messages": [response],
